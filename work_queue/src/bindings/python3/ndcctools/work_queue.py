@@ -1415,6 +1415,23 @@ class WorkQueue(object):
         return work_queue_enable_monitoring_full(self._work_queue, dirname, watchdog)
 
     ##
+    # Activate Speculative execution of tasks
+    # @param q Reference to the current work queue object.
+    # @param multiplier Speculative multipler.
+    # - If multiplier is negative, the speculation is disabled (default Work Queue behavior).
+    # - If multiplier is positive, it should be greater or equal to 1.0, meaning that speculation occurs when the running time
+    #  of the task becomes greater then average*multiplier;
+    # - If multiplier is equal to zero (or in the range (0.0, 1.0)), the speculation is done as MapReduce "backup tasks", i.e.
+    #  all tasks are speculated but they get the lowest priority, thus running only after all regular tasks were dispatched
+    #  to workers and there are idle workers.
+    # @param priority Speculative tasks priority.
+    # - When the multiplier is zero (backup tasks mode), priority is ignored if greater or equal to zero (see above).
+    # - When the multiplier is greater that zero, priority should not be much lower than regular tasks or the speculative
+    #  tasks may be scheduled too late, defeating the purpose of enabling speculation.
+    #
+    def activate_speculation(self, multiplier, priority):
+        return work_queue_activate_speculation(self._work_queue, multiplier, priority)
+    ##
     # Turn on or off fast abort functionality for a given queue for tasks in
     # the "default" category, and for task which category does not set an
     # explicit multiplier.

@@ -242,6 +242,12 @@ struct work_queue {
 	int wait_retrieve_many;
 	int proportional_resources;
 	int proportional_whole_tasks;
+
+    // Speculative execution fields;
+	double speculative_multiplier;
+	int speculative_priority;
+	struct itable* replicas;
+
 };
 
 struct work_queue_worker {
@@ -4741,6 +4747,63 @@ static void ask_for_workers_updates(struct work_queue *q) {
 	}
 }
 
+
+static void check_replicas(struct work_queue *q, struct work_queue_task* t){
+	if (q->speculative_multiplier < 0.0) return; // return early if speculation is disabled
+	struct work_queue_task* other = itable_lookup(q->replicas, t->taskid);
+	if (other){
+		if(strcmp(t->category, "replica")==0){
+			debug(D_WQ, "Speculative task %d finished before the regular task. Tag: '%s', cmd: '%s'", t->taskid, t->tag, t->command_line);
+        } else{
+            debug(D_WQ, "Regular task %d finished before the speculative task. Tag: '%s', cmd: '%s'", t->taskid, t->tag, t->command_line);
+		}
+		// Remove both tasks from the replica table
+		itable_remove(q->replicas, t->taskid);
+		itable_remove(q->replicas, other->taskid);
+        debug(D_WQ, "Found task %d pointing to task %d in the map. Cancelling %d.", t->taskid, other->taskid, other->taskid);
+		struct work_queue_task *tmp = work_queue_cancel_by_taskid(q, other->taskid);
+		if (tmp!=other) warn(D_WQ, "Warning, the mirror task returned was a different pointer!");
+		work_queue_task_delete(other); // Delete the canceled task, since it won't be returned to the user
+	} // else ok, not all tasks will have replicas
+}
+
+static int submit_replicas(struct work_queue* q){
+	int events = 0;
+	if(q->speculative_multiplier < 0.0) return events;  // return early if speculation is disabled
+	struct work_queue_stats s;
+    work_queue_get_stats(q, &s);
+	if (s.tasks_done < 5) return events; // return early if not enough tasks
+	double average = (s.time_workers_execute_good + s.time_send_good + s.time_receive_good) / s.tasks_done;
+	if (average < 1.0) return events; // return early if average is too small.
+	double spec_trigger = average*q->speculative_multiplier;
+	debug(D_WQ, "Current speculative trigger is %f secs.", spec_trigger*1.e-6);
+	timestamp_t now = timestamp_get();
+	struct work_queue_task *t;
+	uint64_t taskid;
+	ITABLE_ITERATE(q->tasks, taskid, t) {
+		// Process tasks that have started and don't have replicas and are not replicas
+		if (task_state_is(q, taskid, WORK_QUEUE_TASK_RUNNING) &&
+			itable_lookup(q->replicas, taskid) == NULL) {
+			double runtime = now - t->time_when_commit_start;
+			int priority = q->speculative_priority;
+			if (runtime >= spec_trigger) {
+				struct work_queue_task *replica = work_queue_task_clone(t);
+				work_queue_task_specify_category(replica, "replica");
+				work_queue_task_specify_priority(replica, priority);
+				int replica_id = work_queue_submit(q, replica);
+				debug(D_WQ, "Task %d is taking too long (%f of %f avg), "
+					  "submitting speculative task %d.",
+					  t->taskid, runtime * 1e-6, average * 1e-6, replica_id);
+				// Add two mappings, one from the original to the clone
+				itable_insert(q->replicas, t->taskid, replica);
+				// And from the clone to the original.
+				itable_insert(q->replicas, replica->taskid, t);
+				events++;
+			}
+		}
+	}
+	return events;
+}
 static int abort_slow_workers(struct work_queue *q)
 {
 	struct category *c;
@@ -5930,6 +5993,10 @@ struct work_queue *work_queue_ssl_create(int port, const char *key, const char *
 		}
 	}
 
+	// Speculative initialization
+	// Negative values indicate speculation is inactive by default;
+	work_queue_activate_speculation(q, -1.0, 0);
+
 	//Deprecated:
 	q->task_ordering = WORK_QUEUE_TASK_ORDER_FIFO;
 	//
@@ -6033,6 +6100,27 @@ int work_queue_activate_fast_abort_category(struct work_queue *q, const char *ca
 int work_queue_activate_fast_abort(struct work_queue *q, double multiplier)
 {
 	return work_queue_activate_fast_abort_category(q, "default", multiplier);
+}
+
+void work_queue_activate_speculation(struct work_queue *q, double multiplier, int priority)
+{
+	if (multiplier < 0.0){
+		debug(D_WQ, "Disabling speculative execution.\n");
+		if (q->replicas != NULL) itable_delete(q->replicas);
+		q->speculative_multiplier = -1.0;
+		q->priority = 0;
+		return;
+	} else {
+		if (multiplier < 1.0){
+			debug(D_WQ, "Enabling speculative execution as backup tasks\n");
+			if(priority >= 0) priority = -10;
+		} else { // Multiplier >= 1.0
+			debug(D_WQ, "Enabling speculative execution with priority: %d and multiplier: %3.3lf\n", priority, multiplier);
+		}
+		q->speculative_priority = priority;
+		q->speculative_multiplier = multiplier;
+		if(q->replicas == NULL) q->replicas = itable_create(0);
+	}
 }
 
 int work_queue_port(struct work_queue *q)
@@ -6944,7 +7032,12 @@ struct work_queue_task *work_queue_wait_internal(struct work_queue *q, int timeo
 				if( t->result != WORK_QUEUE_RESULT_SUCCESS )
 				{
 					q->stats->tasks_failed++;
+				} else if (t->return_status == 0){
+					// If task was successfull, check for replicas not DONE yet.
+					check_replicas(q, t);
 				}
+
+
 
 				// return completed task (t) to the user. We do not return right
 				// away, and instead break out of the loop to correctly update the
@@ -7039,6 +7132,17 @@ struct work_queue_task *work_queue_wait_internal(struct work_queue *q, int timeo
 			events++;
 			continue;
 		}
+
+		// Submit replicas if speculative execution is enabled
+		BEGIN_ACCUM_TIME(q, time_internal);
+		result = submit_replicas(q);
+		END_ACCUM_TIME(q, time_internal);
+		if(result) {
+			// Submitted at least one replica task
+			events++;
+			continue;
+		}
+
 
 		// if new workers, connect n of them
 		BEGIN_ACCUM_TIME(q, time_status_msgs);

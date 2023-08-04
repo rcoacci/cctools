@@ -4776,7 +4776,6 @@ static int submit_replicas(struct work_queue* q){
 	double average = (s.time_workers_execute_good + s.time_send_good + s.time_receive_good) / s.tasks_done;
 	if (average < 1.0) return events; // return early if average is too small.
 	double spec_trigger = average*q->speculative_multiplier;
-	debug(D_WQ, "Current speculative trigger is %f secs.", spec_trigger*1.e-6);
 	timestamp_t now = timestamp_get();
 	struct work_queue_task *t;
 	uint64_t taskid;
@@ -4794,6 +4793,7 @@ static int submit_replicas(struct work_queue* q){
 				debug(D_WQ, "Task %d is taking too long (%f of %f avg), "
 					  "submitting speculative task %d.",
 					  t->taskid, runtime * 1e-6, average * 1e-6, replica_id);
+				debug(D_WQ, "Current speculative trigger is %f secs.", spec_trigger*1.e-6);
 				// Add two mappings, one from the original to the clone
 				itable_insert(q->replicas, t->taskid, replica);
 				// And from the clone to the original.
@@ -6324,6 +6324,8 @@ void work_queue_delete(struct work_queue *q)
 		rmsummary_delete(q->measured_local_resources);
 		rmsummary_delete(q->current_max_worker);
 		rmsummary_delete(q->max_task_resources_requested);
+
+		if (q->replicas != NULL) itable_delete(q->replicas);
 
 		free(q);
 	}

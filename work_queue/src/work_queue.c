@@ -4747,7 +4747,6 @@ static void ask_for_workers_updates(struct work_queue *q) {
 	}
 }
 
-
 static void check_replicas(struct work_queue *q, struct work_queue_task* t){
 	if (q->speculative_multiplier < 0.0) return; // return early if speculation is disabled
 	struct work_queue_task* other = itable_lookup(q->replicas, t->taskid);
@@ -4760,10 +4759,17 @@ static void check_replicas(struct work_queue *q, struct work_queue_task* t){
 		// Remove both tasks from the replica table
 		itable_remove(q->replicas, t->taskid);
 		itable_remove(q->replicas, other->taskid);
-        debug(D_WQ, "Found task %d pointing to task %d in the map. Cancelling %d.", t->taskid, other->taskid, other->taskid);
-		struct work_queue_task *tmp = work_queue_cancel_by_taskid(q, other->taskid);
-		if (tmp!=other) warn(D_WQ, "Warning, the mirror task returned was a different pointer!");
-		work_queue_task_delete(other); // Delete the canceled task, since it won't be returned to the user
+		if (t->result == WORK_QUEUE_RESULT_SUCCESS && t->return_status == 0) {
+			debug(D_WQ, "Found successful task %d pointing to task %d in the map. Cancelling %d.", t->taskid, other->taskid, other->taskid);
+			struct work_queue_task *tmp = work_queue_cancel_by_taskid(q, other->taskid);
+			if (tmp!=other) warn(D_WQ, "Warning, the mirror task returned was a different pointer!");
+			work_queue_task_delete(other); // Delete the canceled task, since it won't be returned to the user
+		} else {
+			// Don't cancel the "other" if the first wasn't successful, so the "other" might succeed
+			debug(D_WQ, "Found UNSUCESSFUL task %d pointing to task %d in the map. "
+				  "NOT cancelling %d, only the replica mapping was removed.",
+				  t->taskid, other->taskid, other->taskid);
+		}
 	} // else ok, not all tasks will have replicas
 }
 
@@ -4772,7 +4778,13 @@ static int submit_replicas(struct work_queue* q){
 	if(q->speculative_multiplier < 0.0) return events;  // return early if speculation is disabled
 	struct work_queue_stats s;
     work_queue_get_stats(q, &s);
-	if (s.tasks_done < 5) return events; // return early if not enough tasks
+	if (s.tasks_done < 5) return events; // return early if not enough done tasks
+	// Backup tasks should be submitted only when resources are idle and no tasks are waiting
+	int is_idle = (s.tasks_waiting == 0 && s.workers_idle > 0);
+	if((q->speculative_multiplier == 0.0) && !is_idle) return events;
+	// If we reach here, either we're running backup tasks and no tasks are waiting in the queue or
+	// we running speculation with multiplier > 0.0 and we have enough done tasks for statistics, so
+	// Either way we can start submitting replicas.
 	double average = (s.time_workers_execute_good + s.time_send_good + s.time_receive_good) / s.tasks_done;
 	if (average < 1.0) return events; // return early if average is too small.
 	double spec_trigger = average*q->speculative_multiplier;
@@ -4782,9 +4794,10 @@ static int submit_replicas(struct work_queue* q){
 	ITABLE_ITERATE(q->tasks, taskid, t) {
 		// Process tasks that have started and don't have replicas and are not replicas
 		if (task_state_is(q, taskid, WORK_QUEUE_TASK_RUNNING) &&
-			itable_lookup(q->replicas, taskid) == NULL) {
+			itable_lookup(q->replicas, taskid) == NULL &&
+			strncmp(t->category, "replica", sizeof("replica"))!=0) {
 			double runtime = now - t->time_when_commit_start;
-			int priority = q->speculative_priority;
+			double priority = q->speculative_priority;
 			if (runtime >= spec_trigger) {
 				struct work_queue_task *replica = work_queue_task_clone(t);
 				work_queue_task_specify_category(replica, "replica");
@@ -5352,7 +5365,7 @@ struct work_queue_file *work_queue_file_create(const char *payload, const char *
 	} else {
 		f->cached_name = make_cached_name(f);
 	}
-	
+
 	return f;
 }
 
@@ -6110,17 +6123,18 @@ void work_queue_activate_speculation(struct work_queue *q, double multiplier, in
 		q->speculative_multiplier = -1.0;
 		q->priority = 0;
 		return;
-	} else {
-		if (multiplier < 1.0){
-			debug(D_WQ, "Enabling speculative execution as backup tasks\n");
-			if(priority >= 0) priority = -10;
-		} else { // Multiplier >= 1.0
-			debug(D_WQ, "Enabling speculative execution with priority: %d and multiplier: %3.3lf\n", priority, multiplier);
-		}
-		q->speculative_priority = priority;
-		q->speculative_multiplier = multiplier;
-		if(q->replicas == NULL) q->replicas = itable_create(0);
 	}
+	if (multiplier >= 0.0 && multiplier < 1.0){
+		multiplier = 0.0;
+		priority = INT_MIN;
+		debug(D_WQ, "Enabling speculative execution as backup tasks, with priority %d\n", priority);
+	} else { // Multiplier >= 1.0
+		debug(D_WQ, "Enabling speculative execution with priority: %d and multiplier: %3.3lf\n", priority, multiplier);
+	}
+	q->speculative_priority = priority;
+	q->speculative_multiplier = multiplier;
+	if(q->replicas == NULL) q->replicas = itable_create(0);
+
 }
 
 int work_queue_port(struct work_queue *q)
@@ -6539,8 +6553,10 @@ static work_queue_task_state_t change_task_state( struct work_queue *q, struct w
 			update_task_result(t, WORK_QUEUE_RESULT_UNKNOWN);
 			push_task_to_ready_list(q, t);
 			break;
-		case WORK_QUEUE_TASK_DONE:
 		case WORK_QUEUE_TASK_CANCELED:
+			// Remove task from ready list if it's there
+			list_remove(q->ready_list, t);
+		case WORK_QUEUE_TASK_DONE:
 			/* tasks are freed when returned to user, thus we remove them from our local record */
 			fill_deprecated_tasks_stats(t);
 			itable_remove(q->tasks, t->taskid);
@@ -7034,11 +7050,9 @@ struct work_queue_task *work_queue_wait_internal(struct work_queue *q, int timeo
 				if( t->result != WORK_QUEUE_RESULT_SUCCESS )
 				{
 					q->stats->tasks_failed++;
-				} else if (t->return_status == 0){
-					// If task was successfull, check for replicas not DONE yet.
-					check_replicas(q, t);
 				}
-
+				// If task was successfull, check for replicas not DONE yet.
+				check_replicas(q, t);
 
 
 				// return completed task (t) to the user. We do not return right
@@ -7135,16 +7149,6 @@ struct work_queue_task *work_queue_wait_internal(struct work_queue *q, int timeo
 			continue;
 		}
 
-		// Submit replicas if speculative execution is enabled
-		BEGIN_ACCUM_TIME(q, time_internal);
-		result = submit_replicas(q);
-		END_ACCUM_TIME(q, time_internal);
-		if(result) {
-			// Submitted at least one replica task
-			events++;
-			continue;
-		}
-
 
 		// if new workers, connect n of them
 		BEGIN_ACCUM_TIME(q, time_status_msgs);
@@ -7166,6 +7170,16 @@ struct work_queue_task *work_queue_wait_internal(struct work_queue *q, int timeo
 				events++;
 				break;
 			}
+		}
+
+		// Submit replicas if speculative execution is enabled
+		BEGIN_ACCUM_TIME(q, time_internal);
+		result = submit_replicas(q);
+		END_ACCUM_TIME(q, time_internal);
+		if(result) {
+			// Submitted at least one replica task
+			events++;
+			continue;
 		}
 
 		// return if queue is empty and something interesting already happened

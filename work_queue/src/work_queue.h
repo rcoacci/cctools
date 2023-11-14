@@ -1185,14 +1185,14 @@ const char *work_queue_result_str(work_queue_result_t result);
 @param multiplier Speculative multipler.
 - If multiplier is negative, the speculation is disabled (default Work Queue behavior).
 - If multiplier is positive, it should be greater or equal to 1.0, meaning that speculation occurs when the running time
-  of the task becomes greater then average*multiplier;
+  of the task becomes greater then average*multiplier (e.g. task is running for more than 1.6 times the average);
 - If multiplier is equal to zero (or in the range (0.0, 1.0)), the speculation is done as MapReduce "backup tasks", i.e.
   all tasks are speculated but they get the lowest priority, thus running only after all regular tasks were dispatched
   to workers and there are idle workers.
 @param priority Speculative tasks priority.
-- When the multiplier is zero (backup tasks mode), priority is ignored if greater or equal to zero (see above).
-- When the multiplier is greater that zero, priority should not be much lower than regular tasks or the speculative
-  tasks may be scheduled too late, defeating the purpose of enabling speculation.
+- When the multiplier is zero (backup tasks mode), priority is ignored.
+- When the multiplier is greater that zero, priority should not be lower than regular tasks or the speculative
+  tasks may be scheduled too late, defeating the purpose of speculation.
 */
 void work_queue_activate_speculation(struct work_queue *q, double multiplier, int priority);
 

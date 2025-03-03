@@ -1,4 +1,9 @@
 # The Cooperative Computing Tools
+## About this fork
+
+This fork contains the implementation of task speculation for the Master Thesis 
+"Transient Fault Tolerance Mechanism for Bag-Of-Tasks Applications in High-Performance Environments" 
+by Rodrigo Coacci at COMPASSO/PESC/COPPE/UFRJ
 
 ## About
 

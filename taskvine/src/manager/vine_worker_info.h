@@ -10,6 +10,7 @@ See the file COPYING for details.
 #include "taskvine.h"
 #include "vine_resources.h"
 
+#include "domain_name.h"
 #include "hash_table.h"
 #include "link.h"
 #include "itable.h"
@@ -41,10 +42,11 @@ struct vine_worker_info {
 	/* Hash key used to locally identify this worker. */
 	char *hashkey;
 
-	/* Address and port where this worker will accept transfers from peers. */
-	char transfer_addr[LINK_ADDRESS_MAX];
+	/* Host (address or hostname) and port where this worker will accept transfers from peers. */
+	char transfer_host[DOMAIN_NAME_MAX];
 	int  transfer_port;
 	int  transfer_port_active;
+	char *transfer_url;       /* worker(ip)?://transfer_addr:transfer_port */
 
 	/* Worker condition that may affect task start or cancellation. */
 	int  draining;                          // if 1, worker does not accept anymore tasks. It is shutdown if no task running.
@@ -56,23 +58,41 @@ struct vine_worker_info {
 	/* Resources and features that describe this worker. */
 	struct vine_resources *resources;
 	struct hash_table     *features;
-	struct vine_stats     *stats;
-	struct hash_table     *libraries;
 
 	/* Current files and tasks that have been transfered to this worker */
 	struct hash_table   *current_files;
 	struct itable       *current_tasks;
-	struct itable       *current_tasks_boxes;
+	struct itable		*current_libraries;
 
+	/* The number of tasks running last reported by the worker */
+	int         dynamic_tasks_running;
+	
 	/* Accumulated stats about tasks about this worker. */
 	int         finished_tasks;
 	int64_t     total_tasks_complete;
 	int64_t     total_bytes_transferred;
+	int         forsaken_tasks;
+	int64_t     inuse_cache;
+
 	timestamp_t total_task_time;
 	timestamp_t total_transfer_time;
+	timestamp_t last_transfer_failure;
 	timestamp_t start_time;
 	timestamp_t last_msg_recv_time;
 	timestamp_t last_update_msg_time;
+	timestamp_t last_failure_time;
+
+	/* consecutive failed peer transfers with worker serving as source or destination */
+	int xfer_streak_bad_source_counter;
+
+	/* consecutive failed peer transfers with worker serving as destination or destination */
+	int xfer_streak_bad_destination_counter;
+
+	/* total transfers */
+	int xfer_total_good_source_counter;
+	int xfer_total_bad_source_counter;
+	int xfer_total_good_destination_counter;
+	int xfer_total_bad_destination_counter;
 };
 
 struct vine_worker_info * vine_worker_create( struct link * lnk );

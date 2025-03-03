@@ -11,7 +11,7 @@ grids, or any idle machines.
 AWE uses Work Queue, which is part of the Cooperating Computing Tools
 (CCTools) package, for dispatching jobs for execution on allocated resources.
 Documentation on downloading, installing, and using Work Queue can be found
-[here](../work_queue).
+[here](../work_queue/index.md).
 
 ## Software Requirements
 
@@ -258,7 +258,7 @@ $ awe-wq -N 10 -C 100 -c cells.dat -w Data/Populations.dat -W Walkers -r folded.
 ```
 
 **Workers** Resources can be allocated either directly using work_queue_worker
-to run tasks locally. To run jobs on SGE or CONDOR use ` sge_submit_workers`
+to run tasks locally. To run jobs on UGE or CONDOR use ` sge_submit_workers`
 and `condor_submit_workers`. Additionally, resources can be managed
 automatically using `work_queue_factory`. Using `work_queue_worker` also
 allows the worker to operate as a ”Foreman”, enabling the hierarchical
@@ -274,7 +274,7 @@ $ work_queue_worker -a -N awe-wq
 Use `work_queue_status` to get the current resources runtime status (number of
 workers, number of tasks waiting/completed, etc). By using `awe-plot-wq-stats`
 the plot of the resource usage over the runtime of the program can be
-obtained. In this case, I've submitted several workers to SGE.
+obtained. In this case, I've submitted several workers to UGE.
 
 ```sh
 $ work_queue_status

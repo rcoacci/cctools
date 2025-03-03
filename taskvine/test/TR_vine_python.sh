@@ -15,6 +15,11 @@ PORT_FILE=vine.port
 check_needed()
 {
 	[ -n "${CCTOOLS_PYTHON_TEST_EXEC}" ] || return 1
+
+	# In some limited build circumstances (e.g. macos build on github),
+	# poncho doesn't work due to lack of conda-pack or cloudpickle
+	"${CCTOOLS_PYTHON_TEST_EXEC}" -c "import conda_pack" || return 1
+	"${CCTOOLS_PYTHON_TEST_EXEC}" -c "import cloudpickle" || return 1
 }
 
 prepare()
@@ -40,7 +45,7 @@ prepare()
 
 run()
 {
-	( ${CCTOOLS_PYTHON_TEST_EXEC} vine_test.py $PORT_FILE; echo $? > $STATUS_FILE ) &
+	( ${CCTOOLS_PYTHON_TEST_EXEC} vine_python.py $PORT_FILE; echo $? > $STATUS_FILE ) &
 
 	# wait at most 15 seconds for vine to find a port.
 	wait_for_file_creation $PORT_FILE 15
@@ -48,7 +53,7 @@ run()
 	run_taskvine_worker $PORT_FILE worker.log
 
 	# wait for vine to exit.
-	wait_for_file_creation $STATUS_FILE 15
+	wait_for_file_creation $STATUS_FILE 30
 
 	# retrieve exit status
 	status=$(cat $STATUS_FILE)

@@ -46,8 +46,8 @@ f = m.declare_url("https://www.gutenberg.org/cache/epub/2600/pg2600.txt")
 g = m.declare_file("myoutput.txt")
 
 t = Task("grep needle warandpeace.txt > output.txt")
-t.add_input(f,"warandpeace.txt")
-t.add_output(g,"outfile.txt")
+t.add_input(f, "warandpeace.txt")
+t.add_output(g, "outfile.txt")
 ```
 
 Tasks share a common set of options.  Each task can be labelled with the resources
@@ -71,7 +71,7 @@ and machine learning.
 ## Quick Start
 
 Installing via `conda` is the easiest method for most users.
-First, [Install Miniconda](https://docs.conda.io/en/latest/miniconda.html) if you haven't done so before.
+First, [Install Miniforge](https://github.com/conda-forge/miniforge#install) if you don't already have `conda` installed.
 Then, open a terminal and install `ndcctools` like this:
 
 ```
@@ -80,8 +80,34 @@ conda install -c conda-forge ndcctools
 
 Using a text editor, create a manager program called `quickstart.py` like this:
 
-```
---8<-- "taskvine/examples/quickstart.py"
+```python
+# quickstart.py
+
+import ndcctools.taskvine as vine
+
+# Create a new manager
+m = vine.Manager([9123, 9129])
+print(f"Listening on port {m.port}")
+
+# Declare a common input file to be shared by multiple tasks.
+f = m.declare_url("https://www.gutenberg.org/cache/epub/2600/pg2600.txt", cache="workflow")
+
+# Submit several tasks using that file.
+print("Submitting tasks...")
+for keyword in ['needle', 'house', 'water']:
+    task = vine.Task(f"grep {keyword} warandpeace.txt | wc")
+    task.add_input(f, "warandpeace.txt")
+    task.set_cores(1)
+    m.submit(task)
+
+# As they complete, display the results:
+print("Waiting for tasks to complete...")
+while not m.empty():
+    task = m.wait(5)
+    if task:
+        print(f"Task {task.id} completed with result {task.output}")
+
+print("All tasks done.")
 ```
 
 Run the manager program at the command line like this:
@@ -117,7 +143,7 @@ To scale up, simply run more workers on a cluster or cloud facility.
 
 ## Example Applications
 
-The following examples show more complex applications and various features of TaskVine: 
+The following examples show more complex applications and various features of TaskVine:
 
 - [BLAST Example](example-blast.md)
 - [Gutenberg Example](example-gutenberg.md)
@@ -125,6 +151,7 @@ The following examples show more complex applications and various features of Ta
 - [Gradient Descent Example](example-gradient-descent.md)
 - [Watch Files Example](example-watch.md)
 - [Functional Example](example-functional.md)
+- [CFD Example](example-cfd.md)
 
 Read on to learn how to build applications from scratch and run large numbers of workers at scale.
 
@@ -174,7 +201,7 @@ to specify zero to indicated any available port:
     ```
     /* Create a new manager listening on any port */
     struct taskvine *m = vine_create(0);
-    printf("listening on port %d\n",vine_port(m));
+    printf("listening on port %d\n", vine_port(m));
 
     ```
 
@@ -194,11 +221,11 @@ The following are examples of basic file descriptions:
     ```
 === "C"
     ```
-    struct vine_file *a = vine_declare_file(m,"mydata.txt",VINE_CACHE);
-    struct vine_file *d = vine_declare_file(m,"dataset/",VINE_CACHE);
-    struct vine_file *u = vine_declare_url(m,"https://ftp.ncbi.nlm.nih.gov/blast/db/human_genome.00.tar.gz",VINE_CACHE);
-    struct vine_file *b = vine_declare_buffer(m,"These words are the contents of the file.",VINE_CACHE);
-    struct vine_file *t = vine_declare_temp(m,VINE_CACHE);
+    struct vine_file *a = vine_declare_file(m, "mydata.txt", VINE_CACHE_LEVEL_WORKFLOW, 0);
+    struct vine_file *d = vine_declare_file(m, "dataset/", VINE_CACHE_LEVEL_WORKFLOW, 0);
+    struct vine_file *u = vine_declare_url(m, "https://ftp.ncbi.nlm.nih.gov/blast/db/human_genome.00.tar.gz", VINE_CACHE_LEVEL_WORKFLOW, 0);
+    struct vine_file *b = vine_declare_buffer(m, "These words are the contents of the file.", VINE_CACHE_LEVEL_WORKFLOW, 0);
+    struct vine_file *t = vine_declare_temp(m);
     ```
 
 `declare_file` indicates a file in the manager's local filesystem
@@ -228,7 +255,10 @@ for the duration of a workflow, and are deleted when no longer needed.
 This accelerates a workflow by avoiding the step of returning the
 data to the manager.
 If a temporary file is unexpectedly lost due to the crash or failure
-of a worker, then the task that created it will be re-executed.
+of a worker, then the task that created it will be re-executed. Temp files
+may also be replicated across workers to a degree set by the `vine_tune` parameter
+`temp-replica-count`. Temp file replicas are useful if significant work
+is required to re-execute the task that created it.
 The contents of a temporary file can be obtained with `fetch_file`
 
 If it is necessary to unpack a file before it is used,
@@ -244,11 +274,11 @@ tasks at once:
 
 === "C"
     ```C
-    struct vine_file *u = vine_declare_url(m,"https://ftp.ncbi.nlm.nih.gov/blast/db/human_genome.00.tar.gz",VINE_CACHE);
-    struct vine_file *x = vine_declare_untar(m,u);
+    struct vine_file *u = vine_declare_url(m, "https://ftp.ncbi.nlm.nih.gov/blast/db/human_genome.00.tar.gz", VINE_CACHE_LEVEL_WORKFLOW, 0);
+    struct vine_file *x = vine_declare_untar(m, u);
     ```
 
-`declare_untar` is an example of a [MiniTask](#MiniTasks), which is explained further below.
+`declare_untar` is an example of a [MiniTask](#minitasks), which is explained further below.
 
 
 ### Declaring Tasks
@@ -269,15 +299,15 @@ which will read the file `mydata` and produce `mydata.gz` as an output:
 === "Python"
     ```python
     t = vine.Task("gzip < mydata > mydata.gz")
-    t.add_input(a,"mydata")
-    t.add_output(b,"mydata.gz")
+    t.add_input(a, "mydata")
+    t.add_output(b, "mydata.gz")
     ```
 
 === "C"
     ```C
     struct vine_task *t = vine_task_create("gzip < mydata > mydata.gz");
-    vine_task_add_input(t,a,"mydata",0)
-    vine_task_add_output(t,b,"mydata.gz",0)
+    vine_task_add_input(t, a, "mydata", 0)
+    vine_task_add_output(t, b, "mydata.gz", 0)
     ```
 
 Note that each task will execute in a private sandbox at a worker.
@@ -352,9 +382,9 @@ when the task is complete.
 
 === "C"
     ```C
-    vine_task_set_cores(t,2);
-    vine_task_set_memory(t,4096);
-    vine_task_set_tag(t,"config-4.5.0");
+    vine_task_set_cores(t, 2);
+    vine_task_set_memory(t, 4096);
+    vine_task_set_tag(t, "config-4.5.0");
     ```
 
 ### Managing Tasks
@@ -370,7 +400,7 @@ to a task:
 
 === "C"
     ```C
-    int taskid = vine_submit(m,t);
+    int taskid = vine_submit(m, t);
     ```
 
 Once all tasks are submitted, use `wait` to wait until a task completes,
@@ -396,7 +426,7 @@ If no task completes within the timeout, it returns null.
 === "C"
     ```C
     while(!vine_empty(q)) {
-        struct vine_task *t = vine_wait(m,5);
+        struct vine_task *t = vine_wait(m, 5);
         if(t) {
             printf("Task %d has returned!\n", t->taskid);
             int result = vine_task_get_result(t);
@@ -473,10 +503,11 @@ $ export PYTHONPATH=${HOME}/cctools/lib/python${PYVER}/site-packages:${PYTHONPAT
 
 #### C Language Setup
 
-If you are writing a TaskVine application in C, you should compile it into an executable like this:
+If you are writing a TaskVine application in C, you should compile it into an executable with a command like this. Note that this example assumes that CCTools has
+been installed using the `conda` method.
 
 ```sh
-${CC:-gcc} taskvine_example.c -o taskvine_example -I${HOME}/cctools/include/cctools -L${HOME}/cctools/lib -ltaskvine -ldttools -lm -lz
+gcc taskvine_example.c -o taskvine_example -I${CONDA_PREFIX}/include/cctools -L${CONDA_PREFIX}/lib -ltaskvine -ldttools -lm -lz
 ```
 
 ### Running a Manager Program
@@ -542,7 +573,7 @@ Similar scripts are available for other common batch systems:
 
 ```sh
 $ vine_submit_workers -T slurm MACHINENAME 9123 10
-$ vine_submit_workers _T sge MACHINENAME 9123 10
+$ vine_submit_workers _T uge MACHINENAME 9123 10
 ```
 
 When the manager completes, if the workers were not otherwise shut down,
@@ -559,7 +590,7 @@ if there are multiple managers. To help with this, a **project name** can be use
 TaskVine workers can then be started for their managers by providing
 the project name instead of a host an port number.
 
-The project name feature uses the [Catalog Server](../catalog) to maintain and track the
+The project name feature uses the [Catalog Server](../catalog/index.md) to maintain and track the
 project names of managers and their respective locations. It works as follows:
 the manager advertises its project name along with its hostname and port to the
 catalog server. TaskVine workers that are provided with the manager's project
@@ -597,10 +628,10 @@ Logging submit event(s)..........
 10 job(s) submitted to cluster 298.
 ```
 
-Or similarly on SGE using `vine_submit_workers` as:
+Or similarly on UGE using `vine_submit_workers` as:
 
 ```sh
-$ vine_submit_workers -T sge -M myproject 10
+$ vine_submit_workers -T uge -M myproject 10
 Your job 153097 ("worker.sh") has been submitted
 Your job 153098 ("worker.sh") has been submitted
 Your job 153099 ("worker.sh") has been submitted
@@ -610,7 +641,7 @@ Your job 153099 ("worker.sh") has been submitted
 ### TaskVine Online Status Display
 
 An additional benefit of using a project name is that you can
-now use the [vine_status](../man_pages/taskvine_status) command
+now use the [vine_status](../man_pages/vine_status.md) command
 to display the progress of your application.  This shows the name,
 location, and statistics of each application that reports itself to the
 catalog server.  (Note that this information is updated about once
@@ -662,7 +693,7 @@ For further options, please refer to the TaskVine factory [manual](../man_pages/
 
 By default, the factory submits as many tasks that are waiting and running up
 to a specified maximum. To run more than one task in a worker, please refer
-to the following section on describing [task resources](#task-resources) and [worker resources](#taskvine-factory-and-resources).
+to the following section on describing [task resources](#task-resources) and [worker resources](#worker-resources).
 
 We can also create a factory directly in python. Creating a factory object does not
 immediately launch it, so this is a good time to configure the resources,
@@ -697,26 +728,31 @@ between workers to share them efficiently.
 
 If necessary, you can control the caching behavior of files individually.
 
-- A cache value of **never** indicates that the file should be deleted as
+- A cache value of **task** indicates that the file should be deleted as
 soon as it is consumed by a task.  This is appropriate for input files
 that are specific to one task, and one task only.
 - A cache value of **workflow** (the default) indicates that the file
 should be retained as long as the workflow runs, and then deleted at the end.
-- A cache value of **always** indicates that the file should be retained
+- A cache value of **worker** indicates that the file should be retained
+by the worker until the worker's end-of-life.
+- A cache value of **forever** indicates that the file should be retained
 by the worker, even across workflows.  This is appropriate for widely used
-software packages and reference datasets.
+software packages and reference datasets. This level of cache leaves files on
+the execution sites even when workers terminate, thus use with care.
 
 === "Python"
     ```python
-    f = m.declare_file("myfile.txt",cache="never") # (default)
-    f = m.declare_file("myfile.txt",cache="workflow") 
-    f = m.declare_file("myfile.txt",cache="always")
+    f = m.declare_file("myfile.txt", cache="task")       # (default, same as cache=False)
+    f = m.declare_file("myfile.txt", cache="workflow")   # (same as cache=True)
+    f = m.declare_file("myfile.txt", cache="worker")
+    f = m.declare_file("myfile.txt", cache="forever")
     ```
 === "C"
     ```
-    vine_declare_file(m,"myfile.txt",VINE_CACHE_NEVER)
-    vine_declare_file(m,"myfile.txt",VINE_CACHE)
-    vine_declare_file(m,"myfile.txt",VINE_CACHE_ALWAYS)
+    vine_declare_file(m, "myfile.txt", VINE_CACHE_LEVEL_TASK, 0)
+    vine_declare_file(m, "myfile.txt", VINE_CACHE_LEVEL_WORKFLOW, 0)
+    vine_declare_file(m, "myfile.txt", VINE_CACHE_LEVEL_WORKER, 0)
+    vine_declare_file(m, "myfile.txt", VINE_CACHE_LEVEL_FOREVER, 0)
     ```
 
 TaskVine generally assumes that a file created on one worker can always
@@ -727,11 +763,11 @@ that peer transfers are not permitted:
 
 === "Python"
     ```python
-    f = m.declare_file("myfile.txt",cache="never",peer_transfer=False)
+    f = m.declare_file("myfile.txt", cache="task", peer_transfer=False)
     ```
 === "C"
     ```
-    vine_declare_file(m,"myfile.txt",VINE_CACHE|VINE_PEER_NOSHARE)
+    vine_declare_file(m, "myfile.txt", VINE_CACHE_LEVEL_WORKFLOW, VINE_PEER_NOSHARE)
     ```
 Automatic sharing of files between workers, or peer transfers, are enabled by default
 in TaskVine. If communication between workers is not possible or not desired, peer transfers
@@ -756,6 +792,10 @@ If peer transfers have been disabled, they may be re-enabled accordingly:
     vine_enable_peer_transfers(m);
     ```
 
+Transfers between workers may be impacted by transient issues which may cause intermittent transfer failures. In these situations we take note of the
+failure that occured, and avoid using the same worker as a source for a period of time. This time period has a default value of 15 seconds.
+It may be changed by the user using `vine_tune` with the parameter `transient-error-interval`.
+
 ### MiniTasks
 
 A task can be used to perform custom fetch operations for input data. TaskVine
@@ -773,11 +813,10 @@ like the input to be the result of a query to a database.
     # use cpio to expand archives coming from a url
     t = Task("cpio -iD output_dir < archive.cpio")
 
-    my_url = m.declare_url("http://somewhere.com/archive.cpio", cache=True)
+    my_url = m.declare_url("http://somewhere.com/archive.cpio", cache="workflow")
     t.add_input(my_url, "archive.cpio")
-    t.set_mini_task_output("output_dir")
 
-    mini_task = m.declare_mini_task(t)
+    mini_task = m.declare_mini_task(t, "output_dir")
 
     # regular tasks can use the mini task as input # the output of the mini
     # task is mounted in the regular task sandbox
@@ -795,11 +834,10 @@ like the input to be the result of a query to a database.
     // use cpio to expand archives coming from a url
     struct vine_task *t = vine_task_create("cpio -iD output_dir < archive.cpio")
 
-    struct vine_file *my_url = vine_declare_url("http://somewhere.com/archive.cpio", VINE_CACHE);
+    struct vine_file *my_url = vine_declare_url("http://somewhere.com/archive.cpio", VINE_CACHE_LEVEL_WORKFLOW, 0);
     vine_task_add_input(my_url, "archive.cpio", 0);
-    vine_task_set_mini_task_output(t, "output_dir");
 
-    struct vine_file *mini_task = m.declare_mini_task(t)
+    struct vine_file *mini_task = m.declare_mini_task(t, "output_dir")
 
     // regular tasks can use the mini task as input
     // the output of the mini task is mounted in the regular task sandbox
@@ -811,22 +849,21 @@ like the input to be the result of a query to a database.
     vine_submit(m, my_other_task);
     ```
 
-### Environments
+### Execution Contexts
 
-The execution of a task can be wrapped with specially designed files called
-environments. These environments ensure that the software dependencies for the
+The execution of a task can be wrapped with specially designed packages called execution contexts.
+These ensure that the software dependencies for the
 task are available in the execution site. TaskVine natively supports two types
 of environments: [poncho](../poncho/index.md), which is based on `conda-pack`;
 and [starch](../man_pages/starch.md), a lightweight package useful when the
 manager and workers run the same linux version. Mini tasks can be used to
 create environments not natively supported, as we will show later to construct
-environments for Apptainer (i.e., singularity containers).
+execution contexts for Apptainer (i.e., singularity containers).
 
 #### Poncho
 
-A Poncho environment is a tarball based on `conda-pack`, and is useful to deliver
-complete python environments. For example, to create a python environment with
-`numpy`:
+A Poncho package is a tarball based on `conda-pack`, and is useful to deliver
+a complete python execution context. For example, to create a python package containing `numpy`:
 
 `my_poncho_spec.json`
 ```json
@@ -843,28 +880,28 @@ complete python environments. For example, to create a python environment with
 }
 ```
 
-In the command line, create the poncho environment from the specification:
+From the command line, create the poncho package like this:
 
 ```sh
-poncho_package_create my_poncho_spec.json my_env.tar.gz
+poncho_package_create my_poncho_spec.json my_poncho_pkg.tar.gz
 ```
 
-Attach the environment to the task:
+Attach the package to the task:
 
 === "Python"
     ```python
     # my task that requires python and numpy
     t = Task("python my_numpy_script.py")
 
-    s = m.declare_file("my_numpy_script.py", cache=True)
+    s = m.declare_file("my_numpy_script.py", cache="workflow")
     t.add_input(s, "my_numpy_script.py")
 
-    # declare the environment and its input file
-    poncho_file = m.declare_file("my_env.tar.gz", cache=True)
-    poncho_env = m.declare_poncho(poncho_file, cache=True)
+    # declare the package and its input file
+    poncho_file = m.declare_file("my_poncho_pkg.tar.gz", cache="workflow")
+    poncho_pkg = m.declare_poncho(poncho_file, cache="workflow")
 
-    # attach the environment to the task
-    t.add_environment(poncho_env)
+    # attach the package to the task
+    t.add_poncho_package(poncho_pkg)
 
     m.submit(t)
     ```
@@ -874,15 +911,15 @@ Attach the environment to the task:
     // my task that requires python and numpy
     struct vine_task *t = vine_task_create("python my_numpy_script.py");
 
-    struct vine_file *s = vine_declare_file("my_numpy_script.py", VINE_CACHE);
+    struct vine_file *s = vine_declare_file("my_numpy_script.py", VINE_CACHE_LEVEL_WORKFLOW, 0);
     vine_task_add_input(t, "my_numpy_script.py", 0);
 
-    // declare the environment and its input file
-    struct vine_file *poncho_file = vine_declare_file("my_env.tar.gz", cache=True);
-    struct vine_file *poncho_env  = vine_declare_poncho(poncho_file, cache=True)
+    // declare the package and its input file
+    struct vine_file *poncho_file = vine_declare_file("my_poncho_pkg.tar.gz", cache="workflow");
+    struct vine_file *poncho_pkg  = vine_declare_poncho(poncho_file, cache="workflow")
 
-    # attach the environment to the task
-    vine_task_add_environment(poncho_env);
+    # attach the package to the task
+    vine_task_add_poncho_package(t, poncho_pkg);
 
     vine_submit(m, t);
     ```
@@ -891,57 +928,66 @@ Attach the environment to the task:
 
 (to do)
 
-#### Custom Environments
+#### Custom Execution Contents
 
-TaskVine expects environments to expand to a directory, with this minimal
+TaskVine expects execution contents to expand to a directory, with this minimal
 structure:
 
 ```text
-env
+root
 └── bin
     └── run_in_env
 ```
 
 where `run_in_env` is an executable file (usually a shell script) that takes as
 an argument a command line to execute. In the rest of this section we will show
-how to construct an environment that runs its command line inside an Apptainer
+how to construct an execution context that runs its command line inside an Apptainer
 container.
 
-##### Apptainer Custom Environment
+##### Apptainer Execution Context
 
 Our script `run_in_env` script simply calls Apptainer with the desired image, and
 mounts the task's sandbox as the home directory:
 
 **run_command_in_apptainer.sh**
 ```shell
---8<-- "taskvine/examples/run_command_in_apptainer.sh"
+#! /bin/sh
+
+# Wrap tasks with an Apptainer container
+
+# get the directory that contains the execution context from the location of this script
+ctx_dir=$(dirname $( cd -- "$( dirname -- "$0" )" > /dev/null 2>&1 && pwd ))
+
+# execute the command line with the container image "image.img"
+exec apptainer exec --home "${VINE_SANDBOX:-${PWD}}" "${ctx_dir}/image.sif" "$@"
+
 ```
 
 To start, we can manually construct in the command line the needed directory
-structure as follows. Later will be automate these steps with a mini task.
+structure as follows. Later we will automate these steps with a mini task.
 
 ```sh
 # ensure the right execution permissions for the script
 chmod 755 run_command_in_apptainer.sh
 
 # construct the needed directory structure
-mkdir -p my_env/bin
+mkdir -p my_ctx/bin
 
 # copy the apptainer script to the expected run_in_env location
-cp run_command_in_apptainer.sh my_env/bin/run_in_env
+cp run_command_in_apptainer.sh my_ctx/bin/run_in_env
 
-# copy the desired image to the environment's directory
-cp path/to/my_image.img my_env/image.img
+# copy the desired image into the package
+cp path/to/my_image.img my_ctx/image.img
 ```
 
-Now we are ready to declare the environment from its local directory "my_env":
+Now we are ready to declare the execution context from its local directory "my_ctx":
 
 === "Python"
     ```python
     t = Task("/bin/echo from inside apptainer!")
 
-    env = m.declare_file("my_env", cache=True)
-    t.add_environment(env)
+    ctx = m.declare_file("my_ctx", cache="workflow")
+    t.add_execution_context(ctx)
 
     m.submit(t)
     ```
@@ -950,19 +996,19 @@ Now we are ready to declare the environment from its local directory "my_env":
     ```C
     struct vine_task *t = vine_task_create("/bin/echo from inside apptainer!");
 
-    struct vine_file *env = vine_declare_file(m, "my_env", VINE_CACHE);
-    vine_task_add_environment(env);
+    struct vine_file *ctx = vine_declare_file(m, "my_ctx", VINE_CACHE_LEVEL_WORKFLOW, 0);
+    vine_task_add_execution_context(ctx);
 
     vine_submit(t);
     ```
 
 
-##### Apptainer Custom Environment with a Mini Task
+##### Apptainer Execution Cpntext From a Mini Task
 
 In the previous section we manually built the directory structure needed for
-the environment. This is not very flexible, as we need to create one such
+the execution context. This is not very flexible, as we need to create one such
 directory per container image that we would like to use. Instead, we can use a
-mini task to construct the environment structure directly on the workers.
+mini task to construct the execution context directly on the workers.
 
 
 === "Python"
@@ -971,26 +1017,23 @@ mini task to construct the environment structure directly on the workers.
     # create the environment structure, thus we use the command ":" as no-op.
     mt = Task(":")
 
-    runner = m.declare_file("run_command_in_apptainer.sh", cache=True)
-    image  = m.declare_file("path/to/my_image.img", cache=True)
+    runner = m.declare_file("run_command_in_apptainer.sh", cache="workflow")
+    image  = m.declare_file("path/to/my_image.img", cache="workflow")
 
-    mt.add_input(runner, "env_dir/bin/run_in_env")
-    mt.add_input(image,  "env_dir/image.img")
+    mt.add_input(runner, "ctx/bin/run_in_env")
+    mt.add_input(image,  "ctx/image.img")
 
-    # the output of the mini task is the environment directory
-    mt.add_output(image,  "env_dir")
-
-    # tell the manager that this is a mini task.
-    env = m.declare_mini_task(mt)
+    # the mini task will extract the environment directory
+    ctx = m.declare_mini_task(mt, "ctx")
 
     # now we define our regular task, and attach the environment to it.
     t = Task("/bin/echo from inside apptainer!")
-    t.add_environment(env)
+    t.add_execution_context(ctx)
 
     m.submit(t)
     ```
 
-You can see the complete example [here](examples/vine_example_apptainer_env.py).
+You can see the complete example [here](examples/vine_example_apptainer_ctx.py).
 
 ### Watching Output Files
 
@@ -1020,13 +1063,13 @@ only be returned when the task fails:
 
 === "Python"
     ```python
-    my_debug = m.declare_file("debug.out", cache=False)
+    my_debug = m.declare_file("debug.out", cache="task")
     t.add_output(my_debug, "debug.out", failure_only=True)
     ```
 
 === "C"
     ```C
-    struct vine_file *my_debug = vine_declare_file("debug.out", VINE_CACHE_NEVER);
+    struct vine_file *my_debug = vine_declare_file("debug.out", VINE_CACHE_LEVEL_TASK, 0);
     vine_task_add_output(t, "debug.out", VINE_FAILURE_ONLY);
     ```
 
@@ -1034,13 +1077,13 @@ In a similar way, files can be marked to indicate that they should be returned o
 
 === "Python"
     ```python
-    my_debug = m.declare_file("debug.out", cache=False)
+    my_debug = m.declare_file("debug.out", cache="task")
     t.add_output(my_debug, "debug.out", success_only=True)
     ```
 
 === "C"
     ```C
-    struct vine_file *my_debug = vine_declare_file("debug.out", VINE_CACHE_NEVER);
+    struct vine_file *my_debug = vine_declare_file("debug.out", VINE_CACHE_LEVEL_TASK, 0);
     vine_task_add_output(t, "debug.out", VINE_SUCCESS_ONLY);
     ```
 ## Advanced Task Handling
@@ -1082,7 +1125,7 @@ Then, modify your manager program to use the password:
 
 === "C"
     ```C
-    vine_set_password_file(m,"vine.password");
+    vine_set_password_file(m, "vine.password");
     ```
 
 
@@ -1140,7 +1183,7 @@ creating the manager:
     ```
 
 
-If you are using a (project name)[#project-names-and-the-catalog-server] for
+If you are using a [project name](#project-names-and-the-catalog-server) for
 your manager, then the workers will be aware that the manager is using SSL and
 communicate accordingly automatically. However, you are directly specifying the
 address of the manager when launching the workers, then you need to add the
@@ -1176,9 +1219,10 @@ limit on the number of retries:
     vine_set_retries(t, 5)
     ```
 
-When a task cannot be completed in the set number of tries,
-then the task result is set to `"max retries"` in python and
-`VINE_RESULT_MAX_RETRIES` in C.
+When a task cannot be completed in the set number of tries, then the its result
+is set to the result of the last attempt (e.g. `"resource exhaustion"` in python,
+or `VINE_RESULT_RESOURCE_EXHAUSTION` in C).
+
 
 ### Pipelined Submission
 
@@ -1200,6 +1244,56 @@ warranted:
         // submit more tasks...
     }
     ```
+
+### Automatic Garbage Collection on Disk
+
+For workflows that generate partial results that are not needed once a final
+result has been computed, TaskVine can automatically delete them from disk when
+the application indicates that they will not be needed anymore:
+
+=== "Python"
+    ```python
+    partial_result = m.declare_file("my_partial_result", unlink_when_done=True)
+
+    t1 = Task(...)
+    t1.add_output(partial_result, "my_partial_result")
+    ...
+
+    t2 = Task(...)
+    t2.add_input(partial_result, "my_partial_result")
+    ...
+
+    # once t2 is done, the following call will remove the file from the
+    # taskvine workflow. Further, when no task refers to the file, the file
+    # will be removed from the manager's disk because of unlink_when_done=True
+    # at its declaration.
+    m.undeclare_file(partial_result)
+    ```
+
+=== "C"
+    ```C
+    struct vine_file *partial_result = vine_declare_file(m, "my_partial_result", VINE_UNLINK_WHEN_DONE);
+
+    struct vine_task *t1 = vine_task_create(...);
+    vine_task_add_output(partial_result, "my_partial_result", /* any desired mount flags */ 0);
+    ...
+
+    struct vine_task *t2 = vine_task_create(...);
+    vine_task_add_input(partial_result, "my_partial_result", /* any desired mount flags */ 0);
+    ...
+
+    # once t2 is done and deleted with `vine_task_delete`, the following call
+    # will remove the file from the taskvine workflow. Further, when no task
+    # refers to the file, the file will be removed from the manager's disk
+    # because of VINE_UNLINK_WHEN_DONE at its declaration.
+    vine_undeclare_file(partial_result);
+    ```
+
+!!! warning
+    Never use this feature on files that the TaskVine application did not create. Otherwise you
+    run the risk of removing irreplaceable input files
+
+
 
 ### Disconnect slow workers
 
@@ -1240,13 +1334,13 @@ corresponding to the resolved file name. For example:
 
 === "Python"
     ```python
-    my_exec = m.declare_file("my-executable.$OS.$ARCH",  cache=True)
+    my_exec = m.declare_file("my-executable.$OS.$ARCH",  cache="workflow")
     t.add_input_input(my_exec, "my_exe")
     ```
 
 === "C"
     ```C
-    struct vine_file *my_exec = vine_declare_file(m, "my-executable.$OS.$ARCH",  VINE_CACHE);
+    struct vine_file *my_exec = vine_declare_file(m, "my-executable.$OS.$ARCH",  VINE_CACHE_LEVEL_WORKFLOW, 0);
     add_input_input(my_exec, "my_exe", 0);
     ```
 
@@ -1266,10 +1360,10 @@ environment.
 ### Task Cancellations
 
 This feature is useful in workflows where there are redundant tasks or tasks
-that become obsolete as other tasks finish. Tasks that have been submitted can
-be cancelled and immediately retrieved without waiting for TaskVine to
-return them in `vine_wait`. The tasks to cancel can be identified by
-either their `taskid` or `tag`. For example:
+that become obsolete as other tasks finish.  Tasks can be removed either
+by either `task_id` or `tag`.  Tasks removed in this way will still be
+returned in the usual way via `wait` with a `result` of `VINE_RESULT_CANCELLED`.
+For example:
 
 === "Python"
     ```python
@@ -1285,11 +1379,11 @@ either their `taskid` or `tag`. For example:
 
     taskid = m.submit(t)
 
-    # cancel task by id. Return the canceled task.
-    t = m.cancel_by_taskid(taskid)
+    # cancel task by id.
+    m.cancel_by_taskid(taskid)
 
-    # or cancel task by tag. Return the canceled task.
-    t = m.cancel_by_tasktag("my-tag")
+    # or cancel task by tag.
+    m.cancel_by_tasktag("my-tag")
     ```
 
 === "C"
@@ -1300,20 +1394,20 @@ either their `taskid` or `tag`. For example:
 
     int taskid = vine_submit(m, t);
 
-    // cancel task by id. Return the canceled task.
-    t = vine_cancel_by_taskid(m, taskid);
+    // cancel task by id.
+    vine_cancel_by_taskid(m, taskid);
 
-    # or cancel task by tag. Return the canceled task.
-    t = vine_cancel_by_tasktag(m, "my-tag");
+    # or cancel task by tag.
+    vine_cancel_by_tasktag(m, "my-tag");
     ```
 
 
 !!! note
     If several tasks have the same tag, only one of them is cancelled. If you
     want to cancel all the tasks with the same tag, you can use loop until
-    `cancel_by_task` does not return a task, as in:
+    `cancel_by_task` returns zero:
 ```
-    while m.cancel_by_taskid("my-tag"):
+    while m.cancel_by_taskid("my-tag")>0:
         pass
 ```
 
@@ -1391,7 +1485,7 @@ You can examine the result of a PythonTask like this:
         t = m.wait(5)
         if t:
             x = t.output
-            if isinstance(x,Exception):
+            if isinstance(x, Exception):
                 print("Exception: {}".format(x))
             else:
                 print("Result: {}".format(x))
@@ -1423,6 +1517,22 @@ conda install -y -p my-env -c conda-forge conda-pack
 conda run -p my-env conda-pack
 ```
 
+#### Using SciUnit to Discover Python Dependencies
+
+If you're unsure which libraries your python tasks require, you can use
+**[SciUnit](https://github.com/depaul-dice/sciunit/wiki)** to detect them
+automatically:
+
+**Example: Generating a `requirements.txt` with SciUnit**
+
+To generate the `requirements.txt` file, use SciUnit to capture dependencies:
+```sh
+sciunit exec python <python_script>
+# SciUnit returns an EID (Execution ID)
+sciunit export <eid>
+# SciUnit creates requirements.txt in the current directory
+```
+
 ### Serverless Computing
 
 TaskVine offers a serverless computing model which is
@@ -1450,14 +1560,51 @@ function definitions into a library task `libtask`
     libtask = m.create_library_from_functions("my_library", my_sum, my_mul)
     ```
 
-The library task can be further described by any of options available
-to normal tasks, such as resources or additional input files:
+We strongly recommend to specify the modules the function needs inside the function itself. This ensures that the correct modules and their aliases will be available when the functions are executed in isolation at the worker:
+
+You can certainly embed `import` statements within the function and install any necessary packages:
 
 === "Python"
     ```python
-    libtask.set_cores(1)
-    libtask.set_memory(2000)
-    libtask.set_disk(2000)
+    def divide(dividend, divisor):
+        import math
+        return dividend / math.sqrt(divisor)
+
+    libtask = m.create_library_from_functions("my_library", divide)
+    ```
+
+If the overhead of importing modules per function is noticeable, modules can be optionally imported as a common preamble to the function executions. Common modules can be specified with the `hoisting_modules` argument to `create_library_from_functions`. This reduces the overhead by eliminating redundant imports:
+
+
+=== "Python"
+    ```python
+    import numpy
+    import math
+
+    hoisting_modules = [numpy, math]
+    ```
+
+`hoisting_modules` only accepts modules as arguments (e.g. it can't be used to import functions, or select particular names with `from ... import ...` statements. Such statements should be made inside functions after specifying the modules with `hoisting_modules`.
+
+=== "Python"
+    ```python
+    def cube(x):
+        # whenever using FromImport statments, put them inside of functions
+        from random import uniform
+        from time import sleep as time_sleep
+
+        random_delay = uniform(0.00001, 0.0001)
+        time_sleep(random_delay)
+
+        return math.pow(x, 3)
+    ```
+
+
+After installing the packages and functions, you can optionally specify the number of functions the library can run concurrently by setting the number of function slots.  (If unset, TaskVine will assume the library can run one function per core available.)
+
+=== "Python"
+    ```python
+    libtask.set_function_slots(4)   # maximum 4 concurrent functions
     ```
 
 Once complete, the library task must be `installed` in the system:
@@ -1468,13 +1615,13 @@ Once complete, the library task must be `installed` in the system:
     ```
 
 This causes the library task to be dispatched and started at
-available workers, where it remains running.  Immeidately after
+available workers, where it remains running.  Immediately after
 installing the library, you may submit `FunctionCall` tasks
 that invoke the library and functions by name:
 
 === "Python"
     ```python
-    t = vine.FunctionCall("my_library","my_mul",20,30);
+    t = vine.FunctionCall("my_library", "my_mul", 20, 30);
     t.set_cores(1)
     t.set_memory(100)
     t.set_disk(100)
@@ -1494,6 +1641,191 @@ and when it is returned, the result is present as `t.output`:
 Note that both library tasks and function invocations consume
 resources at the worker, and the number of running tasks will be
 constrained by the available resources in the same way as normal tasks.
+
+### Stateful Serverless Computing
+A function typically sets up its states (e.g., load modules/packages, build internal models or states) before executing its computation. With advanced serverless computing in TaskVine, you can set up a shared state between function invocations so the cost of setting up states doesn't have to be paid for every invocation, but instead is paid once and shared many times. TaskVine supports this technique as demonstrated via the below example.
+
+Assume that you program has two functions `my_sum` and `my_mul`, and they both use `base` to set up a common value in their computations.
+
+=== "Python"
+    ```python
+    def base(x, y=1):
+        return x**y
+
+    A = 2
+    B = 3
+
+    def my_sum(x, y):
+        base_val = base(A, B)
+        return base_val + x+y
+
+    def my_mul(x, y):
+        base_val = base(A, B)
+        return base_val + x*y
+    ```
+
+With this setup, `base(A, B)` has to be called repeatedly for every function invocation of `my_sum` and `my_mul`. What you want instead is to have the value of `base(A, B)` created and computed once and stored in a library. `my_sum` and `my_mul` thus only have to load such value, instead of computing the value, from a library's state, as follows.
+
+=== "Python"
+    ```python
+    from ndcctools.taskvine.utils import load_variable_from_library
+    def base(x, y=1):
+        return {'base_val': x**y}
+
+    A = 2
+    B = 3
+
+    def my_sum(x, y):
+        base_val = load_variable_from_library('base_val')
+        return base_val + x+y
+
+    def my_mul(x, y):
+        base_val = load_variable_from_library('base_val')
+        return base_val + x*y
+
+    libtask = m.create_library_from_functions("my_library", my_sum, my_mul, library_context_info=[base, [A], {'y': B})
+    m.install(libtask)
+    # application continues as usual with submitting FunctionCalls and waiting for results.
+    ...
+    ```
+
+This technique enables maximum sharing between invocations of functions that share some common states, and between invocations of the same function in a library. This is especially helpful in ML/AI workloads where one has to build an ML/AI model on a remote node to best configure it against the remote node's local resources (e.g., GPU). Thus, instead of loading and creating a model for every invocation:
+
+=== "Python"
+    ```python
+    def infer(image):
+        # load model parameters
+        ...
+        # build model
+        model = tf.ResNet50(...)
+        # load model in GPU
+        model.to_gpu(1)
+        # execute an inference
+        return model.infer(image)
+    ```
+
+One can do this to have the model created and loaded in a GPU once and separate the model creation from the actual inference:
+
+=== "Python"
+    ```python
+    from ndcctools.taskvine.utils import load_variable_from_library
+    def model_setup():
+        # load model parameters
+        ...
+        # build model
+        model = tf.ResNet50(...)
+        # load model in GPU
+        model.to_gpu(1)
+        return {'model': model}
+
+    def infer(image):
+        model = load_variable_from_library('model')
+        # execute an inference
+        return model.infer(image)
+
+    libtask = m.create_library_from_functions('infer_library',
+                                              infer,
+                                              library_context_info=[model_setup, [], {})
+    m.install(libtask)
+
+    # application continues as usual with submitting FunctionCalls and waiting for results.
+    ...
+    ```
+
+
+
+### Futures
+
+TaskVine provides a futures executor model which is a subclass
+of Python's concurrent futures executor. A function along with its
+arguments are submitted to the executor to be executed. A future is
+returned whose value will be resolved at some later point.
+
+To create a future, a `FuturesExecutor` object must first be created. Tasks can
+then be submitted through the `submit` function. This will return
+a Future object. The result of the task can retrieved by calling `future.result()`
+
+=== "Python"
+    ```python
+    import ndcctools.taskvine as vine
+
+    def my_sum(x, y):
+        return x + y
+
+    m = vine.FuturesExecutor(manager_name='my_manager')
+
+    a = m.submit(my_sum, 3, 4)
+    b = m.submit(my_sum, 5, 2)
+    c = m.submit(my_sum, a, b)  # note that the futures a and b are
+                                # passed as any other argument.
+
+    print(c.result())
+    ```
+
+If the tasks need to be configured in some way, for example to specify maximum
+resources allowed, the method `future_task` returns a `FuturePythonTask` that
+can be tailored as any other task:
+
+
+=== "Python"
+    ```python
+    import ndcctools.taskvine as vine
+
+    def my_sum(x, y):
+        return x + y
+
+    m = vine.FuturesExecutor(manager_name='my_manager')
+
+    t = m.future_task(my_sum, 3, 4)
+    t.set_cores(1)
+
+    f = m.submit(t)
+
+    print(f.result())
+    ```
+
+Additionally, the executor the Vine Factory to submit TaskVine workers.
+Specifications for the workers can be provided via the `opts` keyword argument when creating to executor.
+
+=== "Python"
+    ```python
+    import ndcctools.taskvine as vine
+
+    def my_sum(x, y):
+        return x + y
+
+    opts = {"memory": 8000, "disk":8000, "cores":8, "min-workers": 5}
+    m = vine.FuturesExecutor(manager_name='my_manager', batch_type="condor", opts=opts)
+
+    t = m.future_task(my_sum, 3, 4)
+    t.set_cores(1)
+
+    f = m.submit(t)
+
+    print(f.result())
+
+Instead of tasks, the futures may also executed using [function calls](#serverless-computing) with the `future_funcall` method:
+
+=== "Python"
+    ```python
+    import ndcctools.taskvine as vine
+
+    def my_sum(x, y):
+        return x + y
+
+    m = vine.FuturesExecutor(manager_name='my_manager')
+
+    libtask = m.create_library_from_functions('test-library', my_sum)
+    m.install_library(libtask)
+
+    t = m.future_funcall('test-library', 'my_sum', 7, 4)
+
+    a = m.submit(t)
+
+    print(a.result())
+    ```
+
+
 
 ### Functional Abstractions
 
@@ -1546,8 +1878,43 @@ m.treeReduce(fn, arry, chunk_size)
 
 Below is an example of all three abstractions, and their expected output:
 
-```
---8<-- "taskvine/examples/functional.py"
+```python
+# abstractions.py
+
+import ndcctools.taskvine as vine
+
+def main():
+    # Set up queue
+    q = vine.Manager(port=9123)
+
+    # map - similar to Python's own map function, but uses a taskvine worker
+    # to complete computation. Returns sequence with the results from the given function
+    # [result] = q.map(func, sequence)
+    # Example: (returns [1, 4, 9, 16])
+    results = q.map(lambda x: x*x, [1, 2, 3, 4])
+    print(results)
+
+    # pair - similar to map function, but uses the function for every pair between
+    # the two sequences. Returns sequence of results of each pair.
+    # [result] = q.pair(func, sequence1, sequence2)
+    # Example: (returns [1, 2, 3, 4, 2, 4, 6, 8, 3, 6, 9, 12, 4, 8, 12, 16])
+    results = q.pair(lambda x, y: x*y, [1, 2, 3, 4], [1, 2, 3, 4])
+    print(results)
+
+    # tree_reduce - combines pairs of values using a given function, and then returns
+    # to a single final number after reducing the sequence.
+    # result = q.tree_reduce(func, sequence)
+    # Example (even): (returns 24)
+    results = q.tree_reduce(lambda x, y: x*y, [1, 2, 3, 4])
+    print(results)
+
+    # Example (odd): (returns 120)
+    results = q.tree_reduce(lambda x, y: x*y, [1, 2, 3, 4, 5])
+    print(results)
+
+
+if __name__ == "__main__":
+    main()
 ```
 
 Run:
@@ -1584,12 +1951,13 @@ as in the following example:
 
 === "Python"
     ```python
-    t.set_cores(1)                     # task needs one core
-    t.set_memory(1024)                 # task needs 1024 MB of memory
-    t.set_disk(4096)                   # task needs 4096 MB of disk space
-    t.set_gpus(0)                      # task does not need a gpu
-    t.set_time_max(100)        # task is allowed to run in 100 seconds
-    t.set_time_min(10)         # task needs at least 10 seconds to run (see vine_worker --wall-time option above)
+    t.set_cores(1)           # task needs one core
+    t.set_memory(1024)       # task needs 1024 MB of memory
+    t.set_disk(4096)         # task needs 4096 MB of disk space
+    t.set_gpus(0)            # task does not need a gpu
+    t.set_time_max(100)      # task is allowed to run in 100 seconds
+    t.set_time_min(10)       # task needs at least 10 seconds to run (see vine_worker --wall-time option above)
+    t.add_feature("NVIDIA RTX A2000")  # task requires this specific GPU type
 
     # these can be set when the task is declared as well:
      t = vine.Task(
@@ -1605,12 +1973,13 @@ as in the following example:
 
 === "C"
     ```C
-    vine_task_set_cores(t,1)                 # task needs one core
-    vine_task_set_memory(t,1024)             # task needs 1024 MB of memory
-    vine_task_set_disk(t,4096)               # task needs 4096 MB of disk space
-    vine_task_set_gpus(t,0)                  # task does not need a gpu
-    vine_task_set_run_time_max(t,100)    # task is allowed to run in 100 seconds
-    vine_task_set_run_time_min(t,10)     # task needs at least 10 seconds to run (see vine_worker --wall-time option above)
+    vine_task_set_cores(t, 1)             # task needs one core
+    vine_task_set_memory(t, 1024)         # task needs 1024 MB of memory
+    vine_task_set_disk(t, 4096)           # task needs 4096 MB of disk space
+    vine_task_set_gpus(t, 0)              # task does not need a gpu
+    vine_task_set_run_time_max(t, 100)    # task is allowed to run in 100 seconds
+    vine_task_set_run_time_min(t, 10)     # task needs at least 10 seconds to run (see vine_worker --wall-time option above)
+    vine_task_add_feature(t, "NVIDIA RTX A2000")  # task requires this specific GPU type
     ```
 
 When the maximum running time is specified, TaskVine will kill any task that
@@ -1668,8 +2037,8 @@ Consider now that the task requires 1 cores, 6GB of memory, and 27 GB of disk:
 
 !!! note
     If you want TaskVine to exactly allocate the resources you have
-    specified, use the `proportional-resources` and `proportional-whole-tasks`
-    parameters as shown [here](#specialized-and-experimental-settings).  In
+    specified, use `m.disable_proportional_resources()` (see also `proportional-whole-tasks`
+    [here](#tuning-specialized-execution-parameters).  In
     general, however, we have found that using proportions nicely adapts to the
     underlying available resources, and leads to very few resource exhaustion
     failures while still using worker resources efficiently.
@@ -1681,7 +2050,7 @@ its number of cores. (This will likely change in the future.)
 When you would like to run several tasks in a worker, but you are not sure
 about the resources each task needs, TaskVine can automatically find values
 of resources that maximize throughput, or minimize waste. This is discussed in
-the section [below](#grouping-tasks-with-similar-resources-needs).
+the section [below](#grouping-tasks-with-similar-resource-needs).
 
 ### Worker Resources
 
@@ -1717,36 +2086,36 @@ In combination with the worker option `--wall-time`, tasks can request a
 minimum time to execute with `set_time_min`, as explained (below)[#setting-task-resources].
 
 You may also use the same `--cores`, `--memory`, `--disk`, and `--gpus` options when using
-batch submission script `vine_submit_workers`, and the script will correctly ask the right 
+batch submission script `vine_submit_workers`, and the script will correctly ask the right
 batch system for a node of the desired size.
 
-The only caveat is when using `vine_submit_workers -T sge`, as there are many
+The only caveat is when using `vine_submit_workers -T uge`, as there are many
 differences across systems that the script cannot manage. For `
-vine_submit_workers -T sge` you have to set **both** the resources used by the
+vine_submit_workers -T uge` you have to set **both** the resources used by the
 worker (i.e., with `--cores`, etc.) and the appropiate computing node with the `
 -p ` option.
 
-For example, say that your local SGE installation requires you to set the
+For example, say that your local UGE installation requires you to set the
 number of cores with the switch ` -pe smp ` , and you want workers with 4
 cores:
 
 ```sh
-$ vine_submit_workers -T sge --cores 4 -p "-pe smp 4" MACHINENAME 9123
+$ vine_submit_workers -T uge --cores 4 -p "-pe smp 4" MACHINENAME 9123
 ```
 
 If you find that there are options that are needed everytime, you can compile
-CCTools using the ` --sge-parameter `. For example, at Notre Dame we
+CCTools using the ` --uge-parameter `. For example, at Notre Dame we
 automatically set the number of cores as follows:
 
 ```sh
-$ ./configure  --sge-parameter '-pe smp $cores'
+$ ./configure  --uge-parameter '-pe smp $cores'
 ```
 
 
 So that we can simply call:
 
 ```sh
-$ vine_submit_workers -T sge --cores 4 MACHINENAME 9123
+$ vine_submit_workers -T uge --cores 4 MACHINENAME 9123
 ```
 
 The variables `$cores `, `$memory `, and `$disk `, have the values of the
@@ -1770,7 +2139,44 @@ set in the configuration file as follows:
 }
 ```
 
-Both memory and disk are set in `MB`.
+### GPU Types and Custom Features
+
+It is sometimes necessary to match a task to a worker that has a specific capability.
+Perhaps your pool of workers has two different kinds of GPUs.
+The type of a GPU is automatically reported as a "feature" that tasks can select.
+
+To describe a task that can only run on a specific GPU type, use `add_feature`:
+
+=== "Python"
+    ```python
+    t.add_feature("NVIDIA RTX A2000") # task requires worker with this feature
+    ```
+
+=== "C"
+    ```C
+    vine_task_add_feature(t, "NVIDIA RTX A2000") # task requires worker with this feature
+    ```
+
+(Note that the GPU feature is automatically reported by the worker
+when it starts up.)
+
+```
+vine_worker: using 4 cores, 15610 MB memory, 33859 MB disk, 1 gpus
+vine_worker: gpu is called feature "NVIDIA RTX A2000"
+```
+
+You may also add additional custom features to a worker at startup time
+using the `--feature` option:
+
+```
+vine_worker ... --feature alpha --feature beta ...
+```
+
+Or, use the factory to start a large number of workers with that feature:
+
+```
+vine_factory ... --feature alpha --feature beta ...
+```
 
 ### Monitoring and Enforcement
 
@@ -1792,26 +2198,26 @@ these limits. You can enable monitoring and enforcement as follows:
     # above declared resources, and generate a time series per task. These time
     # series are written to the logs directory `vine-logs/time-series`.
     # Use with caution, as time series for long running tasks may be in the
-    # order of gigabytes. 
-    m.enable_monitoring(m,watchdog=False,time_series=True)
+    # order of gigabytes.
+    m.enable_monitoring(m, watchdog=False, time_series=True)
     ```
 
 === "C"
     ```C
     /* Measure the resources used by tasks, and terminate tasks that go above their
     resources: */
-    vine_enable_monitoring(m,1,0)
+    vine_enable_monitoring(m, 1, 0)
 
     /* Measure the resources used by tasks, but do not terminate tasks that go above
     declared resources: */
-    vine_enable_monitoring(m,0,0)
+    vine_enable_monitoring(m, 0, 0)
 
     /* Measure the resources used by tasks, but do not terminate tasks that go
     above # declared resources, and generate a time series per task. These time
     series are written to the logs directory `vine-logs/time-series`.
     Use with caution, as time series for long running tasks may be in the
     order of gigabytes. */
-    vine_enable_monitoring(m,0,1)
+    vine_enable_monitoring(m, 0, 1)
     ```
 
 When monitoring is enabled, you can explore the resources measured when a task
@@ -1835,7 +2241,7 @@ returns:
 
 === "C"
     ```C
-    vine_task *t = vine_wait(m,5);
+    vine_task *t = vine_wait(m, 5);
     if(t) {
         const struct rmsummary *measured  = vine_task_get_resources(t, "measured");
         const struct rmsummary *requested = vine_task_get_resources(t, "requested");
@@ -1939,7 +2345,7 @@ compute some efficient defaults. To assign a task to a category:
 
 === "C"
     ```C
-    vine_task_set_category(t,"my-category-a")
+    vine_task_set_category(t, "my-category-a")
     ```
 When a category leaves some resource unspecified, then TaskVine tries to find
 some reasonable defaults in the same way described before in the section
@@ -1987,7 +2393,7 @@ Automatic resource management is enabled per category as follows:
 
 === "C"
     ```C
-    vine_enable_monitoring(m,0,0);
+    vine_enable_monitoring(m, 0, 0);
     vine_set_category_resources_max(m, "my-category-a", NULL);
     vine_set_category_mode(m, "my-category-a", VINE_ALLOCATION_MODE_MAX_THROUGHPUT);
 
@@ -2014,7 +2420,7 @@ automatic resource computation will never go below the values set:
     ```C
     struct rmsummary *r = rmsummary_create(-1);
     r->memory = 512;
-    vine_set_category_resources_min(m,"my-category-a", r);
+    vine_set_category_resources_min(m, "my-category-a", r);
     rmsummary_delete(r);
     ```
 
@@ -2046,10 +2452,10 @@ cores, memory and disk have modifiers `~` and `>` as follows:
     modified when more efficient values are found.
 
 
-## Logging and Plotting Facilities
+## Logging, Plotting, and Tuning
 
-A TaskVine manager produces three logs: `debug`, `performance`, and
-`transactions`. These logs are always enabled, and appear in the current
+A TaskVine manager produces several logs: `debug`, `taskgraph`, `performance`,
+and `transactions`. These logs are always enabled, and appear in the current
 working directory in the sudirectories:
 
 ```sh
@@ -2067,6 +2473,7 @@ If you need to change the prefix `vine-run-info` to some other directory, use
     ```
 
 === "C"
+    ```C
     // logs appear at /new/desired/path/%Y-%m-%dT%H:%M:%S/vine-logs
     vine_set_runtime_info_path("/new/desired/path")
     struct taskvine *m = vine_create(0);
@@ -2096,6 +2503,18 @@ To enable debugging at the worker, set the `-d` option:
 $ vine_worker -d all -o worker.debug -M myproject
 ```
 
+Custom APPLICATION messages can be added to the log with the calls:
+
+=== "Python"
+    ```python
+    m.log_debug_app("your custom log message")
+    ```
+
+=== "C"
+    ```
+    vine_log_debug_app("your custom log message")
+    ```
+
 ### Performance Log
 
 The performance log contains a time series of the statistics collected by the manager,
@@ -2106,216 +2525,109 @@ total number of cores available, etc. The log is located by default at:
 vine-run-info/%Y-%m-%dT%H:%M:%S/vine-logs/performance
 ```
 
-The time series are presented in columns, with the leftmost column as a
-timestamp in microseconds. The first row always contains the name of the
-columns. Here is an example of the first few rows and columns.
+Install gnuplot to enable the use of `vine_graph_log`
 
-```text
-# timestamp workers_connected workers_init workers_idle workers_busy workers_...
-1602165237833411 0 0 0 0 0 0 0 0 0 0 0 0 5 0 0 0 5 0 0 0 0 0 1602165237827668 ...
-1602165335687547 1 0 0 1 1 1 0 0 0 0 0 0 4 1 0 0 5 0 0 0 0 0 1602165237827668 ...
-1602165335689677 1 0 0 1 1 1 0 0 0 0 0 0 4 1 1 1 5 1 0 0 0 0 1602165237827668 ...
-...
+```sh
+conda install conda-forge::gnuplot
 ```
 
 The script `vine_graph_log` is a wrapper for `gnuplot`, and with it you
 can plot some of the statistics, such as total time spent transfering tasks,
-number of tasks running, and workers connected:
+number of tasks running, and workers connected.  For example, this command:
 
 ```sh
 $ vine_graph_log -o myplots my.stats.log
-$ ls *.png
-$ ... my.stats.log.tasks.png my.stats.log.tasks-log.png my.stats.log.time.png my.stats.log.time-log.png ...
 ```
 
-We find it very helpful to plot these statistics when diagnosing a problem with
-TaskVine applications.
+produces the following graphs:
+
+![](images/plot-perf-montage.png)
+
+- [Performance Log File Format Details](log-file-formats.md#performance-log-format)
 
 ### Transactions Log
 
-Finally, the transactions log records the lifetime of tasks and workers. It is
+The transactions log records the lifetime of tasks and workers. It is
 specially useful for tracking the resources requested, allocated, and used by
-tasks. It is located by default at:
+specific tasks. It is located by default at:
 
 ```sh
 vine-run-info/%Y-%m-%dT%H:%M:%S/vine-logs/transactions
 ```
 
-The first few lines of the log document the possible log records:
-
-```text
-# time manager_pid MANAGER manager_pid START|END time_from_origin
-# time manager_pid WORKER worker_id CONNECTION host:port
-# time manager_pid WORKER worker_id DISCONNECTION (UNKNOWN|IDLE_OUT|FAST_ABORT|FAILURE|STATUS_WORKER|EXPLICIT)
-# time manager_pid WORKER worker_id RESOURCES {resources}
-# time manager_pid WORKER worker_id CACHE_UPDATE filename size_in_mb wall_time_us start_time_us
-# time manager_pid WORKER worker_id TRANSFER (INPUT|OUTPUT) filename size_in_mb wall_time_us start_time_us
-# time manager_pid CATEGORY name MAX {resources_max_per_task}
-# time manager_pid CATEGORY name MIN {resources_min_per_task_per_worker}
-# time manager_pid CATEGORY name FIRST (FIXED|MAX|MIN_WASTE|MAX_THROUGHPUT) {resources_requested}
-# time manager_pid TASK task_id WAITING category_name (FIRST_RESOURCES|MAX_RESOURCES) attempt_number {resources_requested}
-# time manager_pid TASK task_id RUNNING worker_id (FIRST_RESOURCES|MAX_RESOURCES) {resources_allocated}
-# time manager_pid TASK task_id WAITING_RETRIEVAL worker_id
-# time manager_pid TASK task_id RETRIEVED (SUCCESS|UNKNOWN|INPUT_MISSING|OUTPUT_MISSING|STDOUT_MISSING|SIGNAL|RESOURCE_EXHAUSTION|MAX_RETRIES|MAX_END_TIME|MAX_WALL_TIME|FORSAKEN) {limits_exceeded} {resources_measured}
-# time manager_pid TASK task_id DONE (SUCCESS|UNKNOWN|INPUT_MISSING|OUTPUT_MISSING|STDOUT_MISSING|SIGNAL|RESOURCE_EXHAUSTION|MAX_RETRIES|MAX_END_TIME|MAX_WALL_TIME|FORSAKEN) exit_code
-# time manager_pid LIBRARY library_id (WAITING|SENT|STARTED|FAILURE) worker_id
-
-```
-
-Lowercase words indicate values, and uppercase indicate constants. A bar (|) inside parentheses indicate a choice of possible constants. Variables encased in braces {} indicate a JSON dictionary. Here is an example of the first few records of a transactions log:
-
-```
-1679929304405580 4107108 MANAGER 4107108 START 0
-1679929315785718 4107108 TASK 1 WAITING default FIRST_RESOURCES 1 {"cores":[1,"cores"]}
-1679929315789781 4107108 TASK 2 WAITING default FIRST_RESOURCES 1 {"cores":[1,"cores"]}
-1679929315791349 4107108 TASK 3 WAITING default FIRST_RESOURCES 1 {"cores":[1,"cores"]}
-1679929315792852 4107108 TASK 4 WAITING default FIRST_RESOURCES 1 {"cores":[1,"cores"]}
-1679929315794343 4107108 TASK 5 WAITING default FIRST_RESOURCES 1 {"cores":[1,"cores"]}
-...
-```
-
-With the transactions log, it is easy to track the lifetime of a task. For example, to print the lifetime of the task with id 1, we can simply do:
-
-```
-$ grep 'TASK \<1\>' my.tr.log
-1599244364466668 16444 TASK 1 WAITING default FIRST_RESOURCES {"cores":[1,"cores"],"memory":[800,"MB"],"disk":[500,"MB"]}
-1599244400311044 16444 TASK 1 RUNNING 10.32.79.143:48268  FIRST_RESOURCES {"cores":[4,"cores"],"memory":[4100,"MB"],...}
-1599244539953798 16444 TASK 1 WAITING_RETRIEVAL 10.32.79.143:48268
-1599244540075173 16444 TASK 1 RETRIEVED SUCCESS  0  {} {"cores":[1,"cores"],"wall_time":[123.137485,"s"],...}
-1599244540083820 16444 TASK 1 DONE SUCCESS  0  {} {"cores":[1,"cores"],"wall_time":[123.137485,"s"],...}
-```
-
-The statistics available are:
-
-| Field | Description |
-|-------|-------------|
-|       | **Stats for the current state of workers** |
-| workers_connected	    | Number of workers currently connected to the manager |
-| workers_init          | Number of workers connected, but that have not send their available resources report yet |
-| workers_idle          | Number of workers that are not running a task |
-| workers_busy          | Number of workers that are running at least one task |
-| workers_able          | Number of workers on which the largest task can run |
-|||
-|       | **Cumulative stats for workers** |
-| workers_joined        | Total number of worker connections that were established to the manager |
-| workers_removed       | Total number of worker connections that were released by the manager, idled-out, slow, or lost |
-| workers_released      | Total number of worker connections that were asked by the manager to disconnect |
-| workers_idled_out     | Total number of worker that disconnected for being idle |
-| workers_slow          | Total number of worker connections terminated for being too slow |
-| workers_blacklisted   | Total number of workers blacklisted by the manager (includes workers_slow) |
-| workers_lost          | Total number of worker connections that were unexpectedly lost (does not include idled-out or slow) |
-|||
-|       | **Stats for the current state of tasks** |
-| tasks_waiting         | Number of tasks waiting to be dispatched |
-| tasks_on_workers      | Number of tasks currently dispatched to some worker |
-| tasks_running         | Number of tasks currently executing at some worker |
-| tasks_with_results    | Number of tasks with retrieved results and waiting to be returned to user |
-|||
-|       | **Cumulative stats for tasks** |
-| tasks_submitted            | Total number of tasks submitted to the manager |
-| tasks_dispatched           | Total number of tasks dispatch to workers |
-| tasks_done                 | Total number of tasks completed and returned to user (includes tasks_failed) |
-| tasks_failed               | Total number of tasks completed and returned to user with result other than VINE_RESULT_SUCCESS |
-| tasks_cancelled            | Total number of tasks cancelled |
-| tasks_exhausted_attempts   | Total number of task executions that failed given resource exhaustion |
-|||
-|       | **Manager time statistics (in microseconds)** |
-| time_when_started  | Absolute time at which the manager started |
-| time_send          | Total time spent in sending tasks to workers (tasks descriptions, and input files) |
-| time_receive       | Total time spent in receiving results from workers (output files) |
-| time_send_good     | Total time spent in sending data to workers for tasks with result VINE_RESULT_SUCCESS |
-| time_receive_good  | Total time spent in sending data to workers for tasks with result VINE_RESULT_SUCCESS |
-| time_status_msgs   | Total time spent sending and receiving status messages to and from workers, including workers' standard output, new workers connections, resources updates, etc. |
-| time_internal      | Total time the manager spents in internal processing |
-| time_polling       | Total time blocking waiting for worker communications (i.e., manager idle waiting for a worker message) |
-| time_application   | Total time spent outside vine_wait |
-|||
-|       | **Wrokers time statistics (in microseconds)** |
-| time_workers_execute             | Total time workers spent executing done tasks |
-| time_workers_execute_good        | Total time workers spent executing done tasks with result VINE_RESULT_SUCCESS |
-| time_workers_execute_exhaustion  | Total time workers spent executing tasks that exhausted resources |
-|||
-|       | **Transfer statistics** |
-| bytes_sent      | Total number of file bytes (not including protocol control msg bytes) sent out to the workers by the manager |
-| bytes_received  | Total number of file bytes (not including protocol control msg bytes) received from the workers by the manager |
-| bandwidth       | Average network bandwidth in MB/S observed by the manager when transferring to workers |
-|||
-|       | **Resources statistics** |
-| capacity_tasks      | The estimated number of tasks that this manager can effectively support |
-| capacity_cores      | The estimated number of workers' cores that this manager can effectively support |
-| capacity_memory     | The estimated number of workers' MB of RAM that this manager can effectively support |
-| capacity_disk       | The estimated number of workers' MB of disk that this manager can effectively support |
-| capacity_instantaneous       | The estimated number of tasks that this manager can support considering only the most recently completed task |
-| capacity_weighted   | The estimated number of tasks that this manager can support placing greater weight on the most recently completed task |
-|||
-| total_cores       | Total number of cores aggregated across the connected workers |
-| total_memory      | Total memory in MB aggregated across the connected workers |
-| total_disk	    | Total disk space in MB aggregated across the connected workers |
-|||
-| committed_cores   | Committed number of cores aggregated across the connected workers |
-| committed_memory  | Committed memory in MB aggregated across the connected workers |
-| committed_disk    | Committed disk space in MB aggregated across the connected workers |
-|||
-| max_cores         | The highest number of cores observed among the connected workers |
-| max_memory        | The largest memory size in MB observed among the connected workers |
-| max_disk          | The largest disk space in MB observed among the connected workers |
-|||
-| min_cores         | The lowest number of cores observed among the connected workers |
-| min_memory        | The smallest memory size in MB observed among the connected workers |
-| min_disk          | The smallest disk space in MB observed among the connected workers |
-|||
-| manager_load       | In the range of [0,1]. If close to 1, then the manager is at full load <br /> and spends most of its time sending and receiving taks, and thus <br /> cannot accept connections from new workers. If close to 0, the <br /> manager is spending most of its time waiting for something to happen. |
-
-
-The script `vine_plot_txn_log` is a visualization tool for
-TaskVine transaction logs based on Python's `matplotlib`. It can be used to
-visualize the life time of tasks and workers, as well as diagnosing the effects
-of file transfer time on overall performance. For example:
+`vine_plot_txn_log` visualizes the transaction logs in several different
+ways, particularly to show the life time of specific tasks and workers,
+as well as the effects of file transfers on overall performance.
 
 ```sh
-vine_plot_txn_log vine-run-info/most-recent/vine-logs/transactions
+vine_plot_txn_log --mode workers vine-run-info/most-recent/vine-logs/transactions workers.png
 ```
 
+to produce a visualization of how tasks are packed into workers like this:
 
-## Specialized and Experimental Settings
+![](images/plot-txn-workers.png)
 
-### Executing Dask Workflows in Python (experimental)
+- [Transactions Log File Format Details](log-file-formats.md#transactions-log-format)
 
-TaskVine can be used to execute Dask workflows using a manager as Dask
-scheduler. The class `DaskVine` implements a TaskVine manager that has a
-`get` that can be used as follows:
+
+Custom APPLICATION messages can be added to the log with the calls:
 
 === "Python"
     ```python
-    import ndcctools.taskvine as vine
-    import dask
-
-    # Create a new manager listening on port 9123
-    m = vine.DaskVine(9123)
-
-    # Define the dask workflow...
-    dask_value = ... 
-
-    # use the manager as the dask scheduler using its get() function
-    result = dask_value.compute(scheduler=m.get)
-
-    # or:
-    with dask.config.set(scheduler=m.get):
-        result = dask_value.compute()
+    m.log_txn_app("your custom log message")
     ```
 
-The `compute` call above may receive the following keyword arguments:
+=== "C"
+    ```
+    vine_log_txn_app("your custom log message")
+    ```
 
-| Keyword | Description |
-|------------ |---------|
-| environment | A TaskVine file that provides an [environment](#environments) to execute each task. |
-| extra_files | A dictionary of {taskvine.File: "remote_name"} of input files to attach to each task.|
-| lazy_transfer | Whether to bring each result back from the workers (False, default), or keep transient results at workers (True) |
-| resources   | A dictionary to specify [maximum resources](#task-resources), e.g. `{"cores": 1, "memory": 2000"}` |
-| resources\_mode | [Automatic resource management](#automatic-resource-management) to use, e.g., "fixed", "max", or "max throughput"| 
+### Task Graph Log
+
+The complete graph of tasks and files is recorded in `taskgraph`
+using the [Graphviz](https://graphviz.org) Dot file format.  With the `dot` tool installed, you
+can visualize the task graph as follows:
+
+```sh
+dot -Tpng vine-run-info/most-recent/vine-logs/taskgraph > taskgraph.png
+```
+
+This can produce results like this:
+
+![Example Task Graph](images/plot-taskgraph.png)
+
+Note that very large task graphs may be impractical to graph at this level of detail.
+
+!!! note
+    You may need to install Graphviz Dot separately like this:
+    ```
+    conda install -c conda-forge graphviz
+    ```
+
+### Other Tools
+
+`vine_plot_compose` visualizes workflow executions in a variety of ways, creating a composition of multiple plots in a single visualiztion. This tool may be useful in
+comparing performance across multiple executions.
+
+```sh
+vine_plot_compose transactions_log_1 ... transactions_log_N --worker-view --task-view --worker-cache --scale --sublabels --out composition.png
+```
+Produces an image containing the specified visualizations for each transactions log included like so:
+
+![Example Plot Composition](images/composition.png)
+
+`vine_transfer_plot_animate` creates an animation visualizing the amount of data exchanged between worker nodes and the manager during the duration of workflow execution.
+
+```sh
+vine_plot_animate debug_log
+```
+produces an animation like this:
+
+![Example Animation](images/anim.gif)
 
 
-### Tunning Specialized Execution Parameters
+
+### Tuning Specialized Execution Parameters
 
 The behaviour of TaskVine can be tuned by the following parameters. We advise
 caution when using these parameters, as the standard behaviour may drastically
@@ -2323,16 +2635,35 @@ change.
 
 | Parameter | Description | Default Value |
 |-----------|-------------|---------------|
-| category-steady-n-tasks | Minimum number of successful tasks to use a sample for automatic resource allocation modes<br>after encountering a new resource maximum. | 25 |
-| proportional-resources | If set to 0, do not assign resources proportionally to tasks. The default is to use proportions. (See [task resources.](#task-resources) | 1 |
-| proportional-whole-tasks | Round up resource proportions such that only an integer number of tasks could be fit in the worker. The default is to use proportions. (See [task resources.](#task-resources) | 1 |
+| attempt-schedule-depth | The amount of tasks to attempt scheduling on each pass of send_one_task in the main loop. | 100 |
+| category-steady-n-tasks | Minimum number of successful tasks to use a sample for automatic resource allocation modes after encountering a new resource maximum. | 25 |
+| default-transfer-rate | The assumed network bandwidth used until sufficient data has been collected.  (1MB/s)
+| disconnect-slow-workers-factor | Set the multiplier of the average task time at which point to disconnect a worker; disabled if less than 1. (default=0)
 | hungry-minimum          | Smallest number of waiting tasks in the manager before declaring it hungry | 10 |
+| hungry-minimum-factor   | Queue is hungry if number of waiting tasks is less than hungry-minumum-factor x (number of workers) | 2 |
+| immediate-recovery    | If set to 1, create recovery tasks for temporary files as soon as their worker disconnects. Otherwise, create recovery tasks only if the temporary files are used as input when trying to dispatch another task. | 0 |
+| keepalive-interval | Set the minimum number of seconds to wait before sending new keepalive checks to workers. | 300 |
+| keepalive-timeout | Set the minimum number of seconds to wait for a keepalive response from worker before marking it as dead. | 30 |
+| load-from-shared-filesystem | If set to 1, workers can load in data to their caches from the shared filesystem | 0 |
+| long-timeout | Set the minimum timeout in seconds when sending a large message to a single worker. | 3600 |
+| max-retrievals | Sets the max number of tasks to retrieve per manager wait(). If less than 1, the manager prefers to retrieve all completed tasks before dispatching new tasks to workers. | 1 |
+| min-transfer-timeout | Set the minimum number of seconds to wait for files to be transferred to or from a worker. | 10 |
 | monitor-interval        | Maximum number of seconds between resource monitor measurements. If less than 1, use default. | 5 |
+| prefer-dispatch | If 1, try to dispatch tasks even if there are retrieved tasks ready to be reportedas done. | 0 |
+| proportional-whole-tasks | Round up resource proportions such that only an integer number of tasks could be fit in the worker. The default is to use proportions. (See [task resources.](#task-resources) | 1 |
+| ramp-down-heuristic     | If set to 1 and there are more workers than tasks waiting, then tasks are allocated all the free resources of a worker large enough to run them. If monitoring watchdog is not enabled, then this heuristic has no effect. | 0 |
 | resource-submit-multiplier | Assume that workers have `resource x resources-submit-multiplier` available.<br> This overcommits resources at the worker, causing tasks to be sent to workers that cannot be immediately executed.<br>The extra tasks wait at the worker until resources become available. | 1 |
+| sandbox-grow-factor    | When task disk sandboxes are exhausted, increase the allocation using their measured valued times this factor. Minimum is 1.1. | 2 |
+| short-timeout | Set the minimum timeout in seconds when sending a brief message to a single worker. | 5 |
+| temp-replica-count    | Number of temp file replicas created across workers | 0 |
+| transfer-outlier-factor | Transfer that are this many times slower than the average will be terminated. | 10 |
+| transfer-replica-per-cycle | Number of replicas to schedule per file per iteration. | 1 |
+| transfer-temps-recovery | If 1, try to replicate temp files to reach threshold on worker removal. | 0 |
+| transient-error-interval | Time to wait in seconds after a resource failure before attempting to use it again | 15 |
 | wait-for-workers        | Do not schedule any tasks until `wait-for-workers` are connected. | 0 |
-| max-retrievals | Sets the max number of tasks to retrievals per manager wait(). If less than 1, the manager prefers to retrievals all completed tasks before dispatching new tasks to workers. | 1 |
-| worker-retrievals | If 1, retrievals all completed tasks from a worker when retrieving results, even if going above the parameter max-retrievals . Otherwise, if 0, retrieve just one task before deciding to dispatch new tasks or connect new workers. | 1 |
-
+| worker-retrievals | If 1, retrieve all completed tasks from a worker when retrieving results, even if going above the parameter max-retrievals . Otherwise, if 0, retrieve just one task before deciding to dispatch new tasks or connect new workers. | 1 |
+| watch-library-logfiles | If 1, watch the output files produced by each of the library processes running on the remote workers, take
+them back the current logging directory. | 0 |
 
 === "Python"
     ```python
@@ -2344,14 +2675,187 @@ change.
     vine_tune(m, "hungry-minumum", 20)
     ```
 
+## Workflow Integration
+
+### Parsl
+TaskVine can be used as a workflow execution engine for Parsl workflows.
+To install Parsl along with TaskVine, create a `conda` environment and
+install `parsl` and `ndcctools` packages:
+
+```sh
+conda install ndcctools parsl
+```
+Using Parsl with TaskVine is as easy as loading the TaskVineExecutor
+configuration and running the workflow as usual. For example,
+below is a simple Parsl application executing a function remotely.
+
+=== "Python"
+    ```python
+    import parsl
+    from parsl import python_app
+    from parsl.configs.vineex_local import config
+
+    @python_app
+    def double(x):
+        return x*2
+
+    with parsl.load(config=config) as dfk:
+        future = double(1)
+        assert future.result() == 2
+    ```
+Save this file as `parsl_vine_example.py`. Running
+`python parsl_vine_example.py`
+will automatically spawn a local worker to execute the function call.
+
+In order to use the TaskVineExecutor with remote resources, you will need to create a configuration as shown below. Using the TaskVine Factory is the simplest way of deploying remote workers. Here a configuration for HTCondor is shown. It is necessary to include a `project_name` in the `TaskVineManagerConfig` in order for the Factory to find the manager.
+
+=== "Python"
+    ```python
+
+    import parsl
+    from parsl import python_app
+    from parsl.config import Config
+    from parsl.executors.taskvine import TaskVineExecutor
+    from parsl.executors.taskvine import TaskVineFactoryConfig
+    from parsl.executors.taskvine import TaskVineManagerConfig
+
+    config = Config(
+        executors=[
+            TaskVineExecutor(
+                factory_config=TaskVineFactoryConfig(
+                    batch_type="condor",
+                    min_workers=1,
+                    max_workers=1,
+                    cores=12,
+                ),
+                manager_config=TaskVineManagerConfig(
+                    project_name="taskvine_parsl",
+                )
+            )
+        ]
+    )
+
+    l = ["Cooperative", "Computing", "Lab"]
+
+    @python_app
+    def hello_taskvine(x, l=l):
+        return l[x]
+
+    with parsl.load(config=config) as dfk:
+        futures = []
+        for i in range(3):
+            futures.append(hello_taskvine(i))
+
+        for i in futures:
+            print(i.result())
+    ```
+
+For more details on how to configure Parsl+TaskVine to scale applications
+with compute resources of
+local clusters and various performance optimizations, please refer to
+the [Parsl documentation](https://parsl.readthedocs.io/en/stable/userguide/configuring.html).
+
+### Dask
+
+TaskVine can be used to execute Dask workflows using a manager as Dask
+scheduler. The class `DaskVine` implements a TaskVine manager that has a
+`get` that can be used as follows:
+
+=== "Python"
+    ```python
+    import ndcctools.taskvine as vine
+    import argparse
+    import getpass
+    import sys
+
+    try:
+        import dask
+        import awkward as ak
+        import dask_awkward as dak
+        import numpy as np
+    except ImportError:
+        print("You need dask, awkward, and numpy installed")
+        print("(e.g. conda install -c conda-forge dask dask-awkward numpy) to run this example.")
+
+    behavior: dict = {}
+
+    @ak.mixin_class(behavior)
+    class Point:
+        def distance(self, other):
+	    return np.sqrt((self.x - other.x) ** 2 + (self.y - other.y) ** 2)
 
 
-### Further Information
+    if __name__ == "__main__":
+        # data arrays
+        points1 = ak.Array([
+	    [{"x": 1.0, "y": 1.1}, {"x": 2.0, "y": 2.2}, {"x": 3, "y": 3.3}],
+	    [],
+	    [{"x": 4.0, "y": 4.4}, {"x": 5.0, "y": 5.5}],
+	    [{"x": 6.0, "y": 6.6}],
+	    [{"x": 7.0, "y": 7.7}, {"x": 8.0, "y": 8.8}, {"x": 9, "y": 9.9}],
+        ])
 
-For more information, please see [Getting Help](../help) or visit the [Cooperative Computing Lab](http://ccl.cse.nd.edu) website.
+        points2 = ak.Array([
+	    [{"x": 0.9, "y": 1.0}, {"x": 2.0, "y": 2.2}, {"x": 2.9, "y": 3.0}],
+	    [],
+	    [{"x": 3.9, "y": 4.0}, {"x": 5.0, "y": 5.5}],
+	    [{"x": 5.9, "y": 6.0}],
+	    [{"x": 6.9, "y": 7.0}, {"x": 8.0, "y": 8.8}, {"x": 8.9, "y": 9.0}],
+        ])
+        array1 = dak.from_awkward(points1, npartitions=3)
+        array2 = dak.from_awkward(points2, npartitions=3)
 
-### Copyright
+        array1 = dak.with_name(array1, name="Point", behavior=behavior)
+        array2 = dak.with_name(array2, name="Point", behavior=behavior)
+
+        distance = array1.distance(array2)
+
+        m = vine.DaskVine(port=9123, ssl=True)
+        m.set_name("test_manager")
+        print(f"Listening for workers at port: {m.port}")
+
+        f = vine.Factory(manager=m)
+        f.cores = 4
+        f.max_workers = 1
+        f.min_workers = 1
+        with f:
+            with dask.config.set(scheduler=m.get):
+                result = distance.compute(resources={"cores": 1}, resources_mode="max", lazy_transfers=True)
+                print(f"distance = {result}")
+            print("Terminating workers...", end="")
+        print("done!")
+    ```
+
+The `compute` call above may receive the following keyword arguments:
+
+| Keyword | Description |
+|------------ |---------|
+| environment | A TaskVine file that provides an [environment](#execution-contexts) to execute each task. |
+| env\_vars   | A dictionary of VAR=VALUE environment variables to set per task. A value should be either a string, or a function that accepts as arguments the manager and task, and that returns a string. |
+| extra\_files | A dictionary of {taskvine.File: "remote_name"} of input files to attach to each task.|
+| lazy\_transfer | Whether to bring each result back from the workers (False, default), or keep transient results at workers (True) |
+| resources   | A dictionary to specify [maximum resources](#task-resources), e.g. `{"cores": 1, "memory": 2000"}` |
+| resources\_mode | [Automatic resource management](#automatic-resource-management) to use, e.g., "fixed", "max", or "max throughput"|
+| task\_mode | Mode to execute individual tasks, such as [function calls](#serverless-computing). to use, e.g., "tasks", or "function-calls"|
+
+## Appendix for Developers
+
+### Library - Worker Communication Patterns
+
+This subsection describes the communication patterns between a library and a worker, agnostic of programming languages a library is implemented in.
+
+Upon library startup, it should send to its worker a json object as a byte stream.
+The json object should have the following keys and associated values' types: `{"name": type-string, "taskid": type-int, "exec\_mode": type-string}`.
+`"name"` should be the name of the library.
+`"taskid"` should be the library' taskid as assigned by a taskvine manager.
+`"exec\_mode"` should be the function execution mode of the library.
+A worker upon receiving a proper library startup message should check all keys against what it knows about the library, and mark the library as ready to receive function calls if the library passes the worker's startup check.
+
+## Further Information
+
+For more information, please see [Getting Help](../help.md) or visit the [Cooperative Computing Lab](http://ccl.cse.nd.edu) website.
+
+## Copyright
 
 CCTools is Copyright (C) 2022 The University of Notre Dame. This software is distributed under the GNU General Public License Version 2. See the file COPYING for
 details.
-

@@ -51,6 +51,7 @@ static struct jx **global_catalog = NULL; //pointer to an array of jx pointers
 struct jx *jexpr = NULL;
 static int columns = 80;
 int manual_ssl_option = 0;
+static char *manual_tls_sni = NULL;
 
 /* negative columns mean a minimum of abs(value), but the column may expand if
  * columns available. */
@@ -148,15 +149,17 @@ static void show_help(const char *progname)
 	fprintf(stdout, " %-30s Send debugging to this file. (can also be :stderr,\n", "-o,--debug-file=<file>");
 	fprintf(stdout, " %-30s or :stdout)\n", "");
 	fprintf(stdout, " %-30s Rotate debug file once it reaches this size.\n", "-O,--debug-rotate-max=<bytes>");
-	fprintf(stdout, " %-30s Use SSL when directly connecting to a manager.", "--ssl");
+	fprintf(stdout, " %-30s Use SSL when directly connecting to a manager.\n", "--ssl");
 	fprintf(stdout, " %-30s Show vine_status version.\n", "-v,--version");
+	fprintf(stdout, " %-30s SNI domain name if different from manager hostname. Implies --ssl.\n", "--tls-sni=<domain name>");
 	fprintf(stdout, " %-30s This message.\n", "-h,--help");
 }
 
 enum {
 	LONG_OPT_WHERE=1000,
 	LONG_OPT_CAPACITY,
-	LONG_OPT_USE_SSL
+	LONG_OPT_USE_SSL,
+	LONG_OPT_TLS_SNI
 };
 
 static void vine_status_parse_command_line_arguments(int argc, char *argv[], const char **manager_host, int *manager_port, const char **project_name)
@@ -179,6 +182,7 @@ static void vine_status_parse_command_line_arguments(int argc, char *argv[], con
 		{"help", no_argument, 0, 'h'},
 		{"where", required_argument, 0, LONG_OPT_WHERE},
 		{"ssl", no_argument, 0, LONG_OPT_USE_SSL},
+		{"tls-sni", required_argument, 0, LONG_OPT_TLS_SNI},
 		{0,0,0,0}};
 
 	signed int c;
@@ -255,6 +259,11 @@ static void vine_status_parse_command_line_arguments(int argc, char *argv[], con
 			break;
 		case LONG_OPT_USE_SSL:
 			manual_ssl_option=1;
+			break;
+		case LONG_OPT_TLS_SNI:
+			free(manual_tls_sni);
+			manual_tls_sni = xxstrdup(optarg);
+			manual_ssl_option = 1;
 			break;
 		default:
 			show_help(argv[0]);
@@ -466,7 +475,7 @@ int do_catalog_query(const char *project_name, struct jx_table *headers, time_t 
 int do_direct_query( const char *manager_host, int manager_port, time_t stoptime )
 {
 	static struct jx_table *query_headers[] = { [QUERY_QUEUE] = queue_headers, task_headers, worker_headers, workers_able_headers, manager_resource_headers };
-	static const char * query_strings[] = { [QUERY_QUEUE] = "queue","task","worker", "wable", "resources"};
+	static const char * query_strings[] = { [QUERY_QUEUE] = "manager","task","worker", "wable", "resources"};
 
 	struct jx_table *query_header = query_headers[query_mode];
 	const char * query_string = query_strings[query_mode];
@@ -482,13 +491,20 @@ int do_direct_query( const char *manager_host, int manager_port, time_t stoptime
 
 	l = link_connect(manager_addr,manager_port,stoptime);
 	if(!l) {
-		fprintf(stderr,"couldn't connect to %s port %d: %s\n",manager_host,manager_port,strerror(errno));
+		fprintf(stderr,"vine_status: couldn't connect to %s port %d: %s\n",manager_host,manager_port,strerror(errno));
 		return 1;
 	}
 
-	if(manual_ssl_option && link_ssl_wrap_connect(l) < 1) {
+	if(manual_ssl_option) {
+	    const char *sni_host = manual_tls_sni;
+	    if (!sni_host) {
+		    sni_host = manager_host;
+	    }
+
+	    if(link_ssl_wrap_connect(l, sni_host) < 1) {
 		fprintf(stderr,"could not setup ssl connection.\n");
 		return 1;
+	    }
 	}
 
 	link_printf(l,stoptime,"%s_status\n",query_string);
@@ -575,4 +591,4 @@ int main(int argc, char *argv[])
 }
 
 
-/* vim: set noexpandtab tabstop=4: */
+/* vim: set noexpandtab tabstop=8: */

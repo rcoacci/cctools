@@ -30,9 +30,6 @@ int main(int argc, char *argv[])
 	struct vine_manager *m;
 	struct vine_task *t;
 
-	//runtime logs will be written to vine_example_mosaic_info/%Y-%m-%dT%H:%M:%S
-	vine_set_runtime_info_path("vine_example_mosaic_info");
-
 	printf("Checking that /usr/bin/convert is installed...\n");
 	int r = access("/usr/bin/convert",X_OK);
 	if(r!=0) {
@@ -63,8 +60,8 @@ int main(int argc, char *argv[])
 
 	vine_enable_peer_transfers(m);
 
-	struct vine_file *convert = vine_declare_file(m, "convert.sfx", VINE_CACHE);
-	struct vine_file *image = vine_declare_url(m, "https://upload.wikimedia.org/wikipedia/commons/7/74/A-Cat.jpg", VINE_CACHE);
+	struct vine_file *convert = vine_declare_file(m, "convert.sfx", VINE_CACHE_LEVEL_WORKFLOW, 0);
+	struct vine_file *image = vine_declare_url(m, "https://upload.wikimedia.org/wikipedia/commons/7/74/A-Cat.jpg", VINE_CACHE_LEVEL_WORKFLOW, 0);
 
 	struct vine_file *temp_file[36];
 
@@ -117,8 +114,8 @@ int main(int argc, char *argv[])
 		vine_task_add_input(t,temp_file[i],filename,0);
 	}
 
-	vine_task_add_input(t,vine_declare_file(m,"montage.sfx",VINE_CACHE),"montage.sfx",0);
-	vine_task_add_output(t,vine_declare_file(m,"mosaic.jpg",VINE_CACHE_NEVER),"mosaic.jpg",0);
+	vine_task_add_input(t,vine_declare_file(m,"montage.sfx",VINE_CACHE_LEVEL_WORKFLOW, 0),"montage.sfx",0);
+	vine_task_add_output(t,vine_declare_file(m,"mosaic.jpg",VINE_CACHE_LEVEL_TASK, 0),"mosaic.jpg",0);
 
 	int task_id = vine_submit(m,t);
 	printf("Submitted task (id# %d): %s\n", task_id, vine_task_get_command(t) );

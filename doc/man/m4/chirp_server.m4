@@ -24,7 +24,7 @@ SECTION(OPTIONS)
 OPTIONS_BEGIN
 OPTION_ARG(A, default-acl,file)Use this file as the default ACL.
 OPTION_FLAG_LONG(inherit-default-acl) Directories without an ACL inherit from parent directories.
-OPTION_ARG(a, auth,method)Enable this authentication method.
+OPTION_ARG(a,auth,flag) Enable authentication mode: unix, hostname, address, ticket, kerberos, or globus.
 OPTION_FLAG(b,background)Run as daemon.
 OPTION_ARG(B, pid-file,file)Write PID to file.
 OPTION_FLAG(C,no-core-dump)Do not create a core dump, even due to a crash.
@@ -37,6 +37,7 @@ OPTION_ARG(G,group-url, url)Base url for group lookups. (default: disabled)
 OPTION_FLAG(h,help)Give help information.
 OPTION_ARG(I, interface,addr)Listen only on this network interface.
 OPTION_ARG(M, max-clients,count)Set the maximum number of clients to accept at once. (default unlimited)
+OPTION_ARG_LONG(max-ticket-duration,time)Set max duration for authentication tickets, in seconds. (default is unlimited)
 OPTION_ARG(n, catalog-name,name)Use this name when reporting to the catalog.
 OPTION_ARG(o,debug-file,file)Write debugging output to this file. By default, debugging is sent to stderr (":stderr"). You may specify logs to be sent to stdout (":stdout") instead.
 OPTION_ARG(O, debug-rotate-max,bytes)Rotate debug file once it reaches this size.

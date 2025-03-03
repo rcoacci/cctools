@@ -15,6 +15,11 @@ PORT_FILE=vine.port
 check_needed()
 {
 	[ -n "${CCTOOLS_PYTHON_TEST_EXEC}" ] || return 1
+
+	# In some limited build circumstances (e.g. macos build on github),
+	# poncho doesn't work due to lack of conda-pack or cloudpickle
+	"${CCTOOLS_PYTHON_TEST_EXEC}" -c "import conda_pack" || return 1
+	"${CCTOOLS_PYTHON_TEST_EXEC}" -c "import cloudpickle" || return 1
 }
 
 prepare()
@@ -27,14 +32,13 @@ prepare()
 
 run()
 {
-	# worker resources (used by worker in factory in wq_alloc_test.py):
 	cores=4
 	memory=2000
 	disk=2000
 	gpus=8
 
-	# send makeflow to the background, saving its exit status.
-	${CCTOOLS_PYTHON_TEST_EXEC} vine_alloc_test.py $PORT_FILE $cores $memory $disk $gpus; echo $? > $STATUS_FILE
+	# send taskvine to the background, saving its exit status.
+	${CCTOOLS_PYTHON_TEST_EXEC} vine_allocations.py $PORT_FILE $cores $memory $disk $gpus; echo $? > $STATUS_FILE
 
 	# retrieve wq script exit status
 	status=$(cat $STATUS_FILE)

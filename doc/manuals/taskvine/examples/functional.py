@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
 # Example of how to use taskvine high order functions
-import taskvine as vine
+import ndcctools.taskvine as vine
+
 
 def main():
     # Set up queue
@@ -29,7 +30,7 @@ def main():
     print(results)
 
     # Example (odd): (returns 120)
-    results = q.tree_reduce(lambda x, y: x*y, [1 ,2, 3, 4, 5])
+    results = q.tree_reduce(lambda x, y: x*y, [1, 2, 3, 4, 5])
     print(results)
 
 

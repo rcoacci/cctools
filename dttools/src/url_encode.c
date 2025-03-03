@@ -11,10 +11,10 @@ See the file COPYING for details.
 
 void url_encode(const char *s, char *t, int length)
 {
-	if(s) {
-		while(*s && length > 1) {
-			if(*s <= 32 || *s == '%' || *s == '\\' || *s == '<' || *s == '>' || *s == '\'' || *s == '\"' || *s > 122) {
-				if(length > 3) {
+	if (s) {
+		while (*s && length > 1) {
+			if (*s <= 32 || *s == '%' || *s == '\\' || *s == '<' || *s == '>' || *s == '\'' || *s == '\"' || *s > 122) {
+				if (length > 3) {
 					snprintf(t, length, "%%%2X", *s);
 					t += 3;
 					length -= 3;
@@ -33,8 +33,8 @@ void url_encode(const char *s, char *t, int length)
 
 void url_decode(const char *s, char *t, int length)
 {
-	while(*s && length > 1) {
-		if(*s == '%') {
+	while (*s && length > 1) {
+		if (*s == '%') {
 			unsigned int x;
 			sscanf(s + 1, "%2x", &x);
 			*t++ = x;
@@ -47,4 +47,4 @@ void url_decode(const char *s, char *t, int length)
 	*t = 0;
 }
 
-/* vim: set noexpandtab tabstop=4: */
+/* vim: set noexpandtab tabstop=8: */

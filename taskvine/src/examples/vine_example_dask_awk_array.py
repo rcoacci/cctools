@@ -18,7 +18,7 @@ try:
     import numpy as np
 except ImportError:
     print("You need dask, awkward, and numpy installed")
-    print("(e.g. conda install -c conda-forge dask dask_awkward numpy) to run this example.")
+    print("(e.g. conda install -c conda-forge dask dask-awkward numpy) to run this example.")
 
 
 behavior: dict = {}
@@ -96,8 +96,9 @@ if __name__ == "__main__":
     f.min_workers = 1
     with f:
         with dask.config.set(scheduler=m.get):
-            result = distance.compute(resources={"cores": 1}, resources_mode="max", lazy_transfer=True)
+            result = distance.compute(resources={"cores": 1}, resources_mode="max", lazy_transfers=True)
             print(f"distance = {result}")
         print("Terminating workers...", end="")
     print("done!")
 sys.exit(0)
+# vim: set sts=4 sw=4 ts=4 expandtab ft=python:

@@ -20,7 +20,7 @@ def my_sum(x, y, negate=False):
     return s
 
 # Create a new queue
-queue = wq.WorkQueue(port=[9123,9130])
+queue = wq.WorkQueue(port=0)
 print("listening on port {}".format(queue.port))
 with open(port_file, "w") as f:
     f.write(str(queue.port))
@@ -59,3 +59,4 @@ while not queue.empty():
 
 assert(positive_sum == (-1 * negative_sum))
 
+# vim: set sts=4 sw=4 ts=4 expandtab ft=python:

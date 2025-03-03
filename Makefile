@@ -44,13 +44,27 @@ install: $(INSTALL_PACKAGES)
 	mkdir -p ${CCTOOLS_INSTALL_DIR}/etc/cctools
 	cp config.mk ${CCTOOLS_INSTALL_DIR}/etc/cctools
 	mkdir -p ${CCTOOLS_INSTALL_DIR}/doc/cctools
-	cp COPYING ${CCTOOLS_INSTALL_DIR}/doc/cctools
-	cp README ${CCTOOLS_INSTALL_DIR}/doc/cctools
+	cp README.md COPYING CREDITS ${CCTOOLS_INSTALL_DIR}/doc/cctools
 
 test: $(CCTOOLS_PACKAGES)
 	./run_all_tests.sh
 
+PACKAGES_TO_LINT = taskvine resource_monitor batch_job dttools poncho
+LINT_PACKAGES = $(PACKAGES_TO_LINT:%=lint-%)
+$(LINT_PACKAGES): config.mk
+	@$(MAKE) -C $(@:lint-%=%) lint
+lint: $(LINT_PACKAGES)
+
+PACKAGES_TO_FORMAT = taskvine resource_monitor batch_job dttools
+FORMAT_PACKAGES = $(PACKAGES_TO_FORMAT:%=format-%)
+$(FORMAT_PACKAGES): config.mk
+	@$(MAKE) -C $(@:format-%=%) format
+format: $(FORMAT_PACKAGES)
+
+doc_serve:
+	mkdocs serve -f doc/mkdocs.yml
+
 rpm:
 	./packaging/rpm/rpm_creator.sh $(RPM_VERSION) $(RPM_RELEASE)
 
-.PHONY: $(CCTOOLS_PACKAGES) $(INSTALL_PACKAGES) $(CLEAN_PACKAGES) all clean install test rpm
+.PHONY: $(CCTOOLS_PACKAGES) $(INSTALL_PACKAGES) $(CLEAN_PACKAGES) all clean install test lint rpm

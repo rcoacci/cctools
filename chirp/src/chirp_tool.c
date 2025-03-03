@@ -257,6 +257,30 @@ static INT64_T do_put(int argc, char **argv)
 	return result;
 }
 
+static INT64_T do_register_aux(const char *host, const char *name, const char *subject, time_t duration, time_t stoptime) {
+	INT64_T status = chirp_reli_ticket_register(host, name, subject, duration, stoptime);
+	if (status < 0) {
+		return status;
+	}
+
+	char *subject_actual;
+	char *ticket_actual;
+	time_t duration_actual;
+	char **rights_actual;
+	status = chirp_reli_ticket_get(current_host, name, &subject_actual, &ticket_actual, &duration_actual, &rights_actual, stoptime);
+
+	if (status < 0) {
+		fprintf(stderr, "Could not get ticket after registering it.\n");
+		return status;
+	}
+
+	if (duration != duration_actual) {
+		fprintf(stderr, "ticket '%s': limit imposed by server, duration is: %llu\n", name, (unsigned long long) duration_actual);
+	}
+
+	return 0;
+}
+
 static INT64_T do_ticket_create(int argc, char **argv)
 {
 	char name[CHIRP_PATH_MAX] = "";
@@ -308,7 +332,7 @@ static INT64_T do_ticket_create(int argc, char **argv)
 	}
 	fprintf(stderr, "ticket '%s': successfully created with %zu bits.\n", name, bits);
 
-	result = chirp_reli_ticket_register(current_host, name, subject, duration, stoptime);
+	result = do_register_aux(current_host, name, subject, duration, stoptime);
 	if(result < 0) {
 		fprintf(stderr, "could not register ticket\n");
 		return result;
@@ -338,9 +362,9 @@ static INT64_T do_ticket_register(int argc, char **argv)
 {
 	assert(argc == 3 || argc == 4);
 	if(argc == 3) {
-		return chirp_reli_ticket_register(current_host, argv[1], NULL, (time_t) strtoull(argv[2], NULL, 10), stoptime);
+		return do_register_aux(current_host, argv[1], NULL, (time_t) strtoull(argv[2], NULL, 10), stoptime);
 	} else {
-		return chirp_reli_ticket_register(current_host, argv[1], argv[2], (time_t) strtoull(argv[3], NULL, 10), stoptime);
+		return do_register_aux(current_host, argv[1], argv[2], (time_t) strtoull(argv[3], NULL, 10), stoptime);
 	}
 }
 
@@ -1060,18 +1084,18 @@ static INT64_T do_job_create(int argc, char **argv)
 
 static INT64_T do_job_commit(int argc, char **argv)
 {
-	return chirp_reli_job_commit(current_host, argv[1], stoptime);
+	return chirp_reli_job_commit(current_host, atoi(argv[1]), stoptime);
 }
 
 static INT64_T do_job_kill(int argc, char **argv)
 {
-	return chirp_reli_job_kill(current_host, argv[1], stoptime);
+	return chirp_reli_job_kill(current_host, atoi(argv[1]), stoptime);
 }
 
 static INT64_T do_job_status(int argc, char **argv)
 {
 	char *status;
-	INT64_T result = chirp_reli_job_status(current_host, argv[1], &status, stoptime);
+	INT64_T result = chirp_reli_job_status(current_host, atoi(argv[1]), &status, stoptime);
 	if (result > 0) {
 		fprintf(stdout, "%s\n", status);
 		free(status);
@@ -1097,7 +1121,7 @@ static INT64_T do_job_wait(int argc, char **argv)
 
 static INT64_T do_job_reap(int argc, char **argv)
 {
-	return chirp_reli_job_reap(current_host, argv[1], stoptime);
+	return chirp_reli_job_reap(current_host, atoi(argv[1]), stoptime);
 }
 
 
@@ -1160,7 +1184,7 @@ static struct command list[] = {
 	{"job_kill", 1, 1, 1, "<id>", do_job_kill},
 	{"job_status", 1, 1, 1, "<id>", do_job_status},
 	{"job_wait", 1, 1, 2, "<id> [timeout]", do_job_wait},
-	{"job_reap", 1, 1, 1, "<json>", do_job_reap},
+	{"job_reap", 1, 1, 1, "<id>", do_job_reap},
 	{0, 0, 0, 0, 0, 0},
 };
 
@@ -1362,4 +1386,4 @@ int main(int argc, char *argv[])
 	}
 }
 
-/* vim: set noexpandtab tabstop=4: */
+/* vim: set noexpandtab tabstop=8: */

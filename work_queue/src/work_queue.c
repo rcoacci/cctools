@@ -201,6 +201,8 @@ struct work_queue {
 
 	int hungry_minimum;               /* minimum number of waiting tasks to consider queue not hungry. */;
 
+	int hungry_minimum_factor;       /* queue is hungry if number of waiting tasks is less than hungry_minimum_factor * number of connected workers. */
+
 	int wait_for_workers;             /* wait for these many workers before dispatching tasks at start of execution. */
 	int attempt_schedule_depth;		  /* number of submitted tasks to attempt scheduling before we continue to retrievals */
 
@@ -242,6 +244,7 @@ struct work_queue {
 	int wait_retrieve_many;
 	int proportional_resources;
 	int proportional_whole_tasks;
+	int ramp_down_heuristic;
 
     // Speculative execution fields;
 	double speculative_multiplier;
@@ -749,7 +752,7 @@ int process_cache_update( struct work_queue *q, struct work_queue_worker *w, con
 	char cachename[WORK_QUEUE_LINE_MAX];
 	long long size;
 	long long transfer_time;
-	
+
 	if(sscanf(line,"cache-update %s %lld %lld",cachename,&size,&transfer_time)==3) {
 		struct remote_file_info *remote_info = hash_table_lookup(w->current_files,cachename);
 		if(remote_info) {
@@ -757,7 +760,7 @@ int process_cache_update( struct work_queue *q, struct work_queue_worker *w, con
 			remote_info->transfer_time = transfer_time;
 		}
 	}
-	
+
 	return MSG_PROCESSED;
 }
 
@@ -779,17 +782,17 @@ int process_cache_invalid( struct work_queue *q, struct work_queue_worker *w, co
 
 		char *message = malloc(length+1);
 		time_t stoptime = time(0) + q->long_timeout;
-		
+
 		int actual = link_read(w->link,message,length,stoptime);
 		if(actual!=length) {
 			free(message);
 			return MSG_FAILURE;
 		}
-		
+
 		message[length] = 0;
 		debug(D_WQ,"%s (%s) invalidated %s with error: %s",w->hostname,w->addrport,cachename,message);
 		free(message);
-		
+
 		struct remote_file_info *remote_info = hash_table_remove(w->current_files,cachename);
 		if(remote_info) remote_file_info_delete(remote_info);
 	}
@@ -1090,7 +1093,7 @@ void update_read_catalog_factory(struct work_queue *q, time_t stoptime) {
 void update_write_catalog(struct work_queue *q, struct link *foreman_uplink)
 {
 	// Only write if we have a name.
-	if (!q->name) return; 
+	if (!q->name) return;
 
 	// Generate the manager status in an jx, and print it to a buffer.
 	struct jx *j = queue_to_jx(q,foreman_uplink);
@@ -1675,10 +1678,10 @@ static work_queue_result_code_t get_output_files( struct work_queue *q, struct w
 		while((f = list_next_item(t->output_files))) {
 			// non-file objects are handled by the worker.
 			if(f->type!=WORK_QUEUE_FILE) continue;
-		     
+
 			int task_succeeded = (t->result==WORK_QUEUE_RESULT_SUCCESS && t->return_status==0);
 
-			// skip failure-only files on success 
+			// skip failure-only files on success
 			if(f->flags&WORK_QUEUE_FAILURE_ONLY && task_succeeded) continue;
 
  			// skip success-only files on failure
@@ -1756,7 +1759,7 @@ static void delete_uncacheable_files( struct work_queue *q, struct work_queue_wo
 
 char *monitor_file_name(struct work_queue *q, struct work_queue_task *t, const char *ext) {
 	char *dir;
-	
+
 	if(t->monitor_output_directory) {
 		dir = t->monitor_output_directory;
 	} else if(q->monitor_output_directory) {
@@ -2185,7 +2188,7 @@ output files of the task.
 */
 static work_queue_result_code_t get_result(struct work_queue *q, struct work_queue_worker *w, const char *line) {
 
-	if(!q || !w || !line) 
+	if(!q || !w || !line)
 		return WQ_WORKER_FAILURE;
 
 	struct work_queue_task *t;
@@ -2660,6 +2663,7 @@ static struct jx * queue_to_jx( struct work_queue *q, struct link *foreman_uplin
 	jx_insert_integer(j,"port",work_queue_port(q));
 	jx_insert_integer(j,"priority",info.priority);
 	jx_insert_string(j,"manager_preferred_connection",q->manager_preferred_connection);
+	jx_insert_integer(j,"protocol",WORK_QUEUE_PROTOCOL_VERSION);
 
 	int use_ssl = 0;
 #ifdef HAS_OPENSSL
@@ -3748,6 +3752,23 @@ static work_queue_result_code_t send_input_files( struct work_queue *q, struct w
 	return WQ_SUCCESS;
 }
 
+int in_ramp_down(struct work_queue *q) {
+	if(!(q->monitor_mode & MON_WATCHDOG)) {
+		/* if monitoring is not terminating tasks because of resources, ramp down heuristic does not have any effect. */
+		return 0;
+	}
+
+	if(!q->ramp_down_heuristic) {
+		return 0;
+	}
+
+	if(hash_table_size(q->worker_table) > list_size(q->ready_list)) {
+		return 1;
+	}
+
+	return 0;
+}
+
 static struct rmsummary *task_worker_box_size(struct work_queue *q, struct work_queue_worker *w, struct work_queue_task *t) {
 
 	const struct rmsummary *min = task_min_resources(q, t);
@@ -3847,6 +3868,18 @@ static struct rmsummary *task_worker_box_size(struct work_queue *q, struct work_
 		if(limits->disk <= 0) {
 			limits->disk = w->resources->disk.largest;
 		}
+	} else if(in_ramp_down(q)) {
+		/* if in ramp down, use all the free space of that worker. note that we don't use
+		 * resource_submit_multiplier, as by definition in ramp down there are more workers than tasks. */
+		limits->cores = limits->gpus > 0 ? 0 : (w->resources->cores.largest - w->resources->cores.inuse);
+
+		/* default gpus is 0 */
+		if(limits->gpus <= 0) {
+			limits->gpus = 0;
+		}
+
+		limits->memory = w->resources->memory.largest - w->resources->memory.inuse;
+		limits->disk = w->resources->disk.largest - w->resources->disk.inuse;
 	}
 
 	/* never go below specified min resources. */
@@ -4123,7 +4156,7 @@ static int check_hand_against_task(struct work_queue *q, struct work_queue_worke
 		r = w->coprocess_resources;
 	}
 
-	
+
 
 	int ok = 1;
 
@@ -4177,6 +4210,40 @@ static int check_hand_against_task(struct work_queue *q, struct work_queue_worke
 	return ok;
 }
 
+// 0 if current_best has more free resources than candidate, 1 else.
+static int candidate_has_worse_fit(struct work_queue_worker *current_best, struct work_queue_worker *candidate)
+{
+	struct work_queue_resources *b = current_best->resources;
+	struct work_queue_resources *o = candidate->resources;
+
+	//Total worker order: free cores > free memory > free disk > free gpus
+	int free_delta = (b->cores.total - b->cores.inuse) - (o->cores.total - o->cores.inuse);
+	if(free_delta > 0) {
+		return 1;
+	} else if(free_delta < 0) {
+		return 0;
+	}
+
+	//Same number of free cores...
+	free_delta = (b->memory.total - b->memory.inuse) - (o->memory.total - o->memory.inuse);
+	if(free_delta > 0) {
+		return 1;
+	} else if(free_delta < 0) {
+		return 0;
+	}
+
+	//Same number of free disk...
+	free_delta = (b->disk.total - b->disk.inuse) - (o->disk.total - o->disk.inuse);
+	if(free_delta > 0) {
+		return 1;
+	} else if(free_delta < 0) {
+		return 0;
+	}
+
+	//Number of free resources are the same.
+	return 0;
+}
+
 static struct work_queue_worker *find_worker_by_files(struct work_queue *q, struct work_queue_task *t)
 {
 	char *key;
@@ -4200,7 +4267,8 @@ static struct work_queue_worker *find_worker_by_files(struct work_queue *q, stru
 				}
 			}
 
-			if(!best_worker || task_cached_bytes > most_task_cached_bytes) {
+			if (!best_worker || task_cached_bytes > most_task_cached_bytes ||
+					(in_ramp_down(q) && task_cached_bytes == most_task_cached_bytes && candidate_has_worse_fit(best_worker, w))) {
 				best_worker = w;
 				most_task_cached_bytes = task_cached_bytes;
 			}
@@ -4251,67 +4319,18 @@ static struct work_queue_worker *find_worker_by_random(struct work_queue *q, str
 	return w;
 }
 
-// 1 if a < b, 0 if a >= b
-static int compare_worst_fit(struct work_queue_resources *a, struct work_queue_resources *b)
-{
-	//Total worker order: free cores > free memory > free disk > free gpus
-	if((a->cores.total < b->cores.total))
-		return 1;
-
-	if((a->cores.total > b->cores.total))
-		return 0;
-
-	//Same number of free cores...
-	if((a->memory.total < b->memory.total))
-		return 1;
-
-	if((a->memory.total > b->memory.total))
-		return 0;
-
-	//Same number of free memory...
-	if((a->disk.total < b->disk.total))
-		return 1;
-
-	if((a->disk.total > b->disk.total))
-		return 0;
-
-	//Same number of free disk...
-	if((a->gpus.total < b->gpus.total))
-		return 1;
-
-	if((a->gpus.total > b->gpus.total))
-		return 0;
-
-	//Number of free resources are the same.
-	return 0;
-}
-
 static struct work_queue_worker *find_worker_by_worst_fit(struct work_queue *q, struct work_queue_task *t)
 {
 	char *key;
 	struct work_queue_worker *w;
 	struct work_queue_worker *best_worker = NULL;
 
-	struct work_queue_resources bres;
-	struct work_queue_resources wres;
-
-	memset(&bres, 0, sizeof(struct work_queue_resources));
-	memset(&wres, 0, sizeof(struct work_queue_resources));
-
 	hash_table_firstkey(q->worker_table);
 	while(hash_table_nextkey(q->worker_table, &key, (void **) &w)) {
 		if( check_hand_against_task(q, w, t) ) {
-
-			//Use total field on bres, wres to indicate free resources.
-			wres.cores.total   = w->resources->cores.total   - w->resources->cores.inuse;
-			wres.memory.total  = w->resources->memory.total  - w->resources->memory.inuse;
-			wres.disk.total    = w->resources->disk.total    - w->resources->disk.inuse;
-			wres.gpus.total    = w->resources->gpus.total    - w->resources->gpus.inuse;
-
-			if(!best_worker || compare_worst_fit(&bres, &wres))
+			if(!best_worker || candidate_has_worse_fit(best_worker, w))
 			{
 				best_worker = w;
-				memcpy(&bres, &wres, sizeof(struct work_queue_resources));
 			}
 		}
 	}
@@ -4331,7 +4350,7 @@ static struct work_queue_worker *find_worker_by_time(struct work_queue *q, struc
 		if(check_hand_against_task(q, w, t)) {
 			if(w->total_tasks_complete > 0) {
 				double t = (w->total_task_time + w->total_transfer_time) / w->total_tasks_complete;
-				if(!best_worker || t < best_time) {
+				if(!best_worker || t < best_time || (t == best_time && in_ramp_down(q) && candidate_has_worse_fit(best_worker, w))) {
 					best_worker = w;
 					best_time = t;
 				}
@@ -4341,6 +4360,8 @@ static struct work_queue_worker *find_worker_by_time(struct work_queue *q, struc
 
 	if(best_worker) {
 		return best_worker;
+	} else if(in_ramp_down(q)) {
+		return find_worker_by_worst_fit(q, t);
 	} else {
 		return find_worker_by_fcfs(q, t);
 	}
@@ -4574,7 +4595,7 @@ static int send_one_task( struct work_queue *q )
 	timestamp_t now = timestamp_get();
 
 	while( (t = list_rotate(q->ready_list)) ) {
-		if(tasks_considered > q->attempt_schedule_depth) {
+		if(tasks_considered++ > q->attempt_schedule_depth) {
 			return 0;
 		}
 
@@ -4583,11 +4604,15 @@ static int send_one_task( struct work_queue *q )
 			continue;
 		}
 
+		struct category *c = work_queue_category_lookup_or_create(q, t->category);
+		if (c->max_concurrent > -1 && c->max_concurrent < c->wq_stats->tasks_running) {
+			continue;
+		}
+
 		// Find the best worker for the task at the head of the list
 		w = find_best_worker(q,t);
 
 		if(!w) {
-			tasks_considered++; 
 			continue;
 		}
 
@@ -4688,7 +4713,7 @@ static int receive_one_task( struct work_queue *q )
 		}
 	}
 	if(!found) return 0;
-	
+
 	w = itable_lookup(q->worker_task_map, t->taskid);
 	fetch_output_from_worker(q, w, t->taskid);
 
@@ -5974,6 +5999,7 @@ struct work_queue *work_queue_ssl_create(int port, const char *key, const char *
 	q->monitor_mode = MON_DISABLED;
 
 	q->hungry_minimum = 10;
+	q->hungry_minimum_factor = 2;
 
 	q->wait_for_workers = 0;
 	q->attempt_schedule_depth = 100;
@@ -6018,13 +6044,8 @@ struct work_queue *work_queue_ssl_create(int port, const char *key, const char *
 
 	q->time_last_wait = timestamp_get();
 
-	char hostname[DOMAIN_NAME_MAX];
-	if(domain_name_cache_guess(hostname)) {
-		debug(D_WQ, "Master advertising as %s:%d", hostname, q->port);
-	}
-	else {
 		debug(D_WQ, "Work Queue is listening on port %d.", q->port);
-	}
+
 	return q;
 }
 
@@ -6067,7 +6088,7 @@ int work_queue_enable_monitoring(struct work_queue *q, char *monitor_output_dire
 	if(q->measured_local_resources)
 		rmsummary_delete(q->measured_local_resources);
 
-	q->measured_local_resources = rmonitor_measure_process(getpid());
+	q->measured_local_resources = rmonitor_measure_process(getpid(), /* do not include disk */ 0);
 	q->monitor_mode = MON_SUMMARY;
 
 	if(watchdog) {
@@ -6350,7 +6371,7 @@ void update_resource_report(struct work_queue *q) {
 	if((time(0) - q->resources_last_update_time) < WORK_QUEUE_RESOURCE_MEASUREMENT_INTERVAL)
 		return;
 
-	rmonitor_measure_process_update_to_peak(q->measured_local_resources, getpid());
+	rmonitor_measure_process_update_to_peak(q->measured_local_resources, getpid(), /* do not include disk */ 0);
 
 	q->resources_last_update_time = time(0);
 }
@@ -6359,7 +6380,7 @@ void work_queue_disable_monitoring(struct work_queue *q) {
 	if(q->monitor_mode == MON_DISABLED)
 		return;
 
-	rmonitor_measure_process_update_to_peak(q->measured_local_resources, getpid());
+	rmonitor_measure_process_update_to_peak(q->measured_local_resources, getpid(), /* do not include disk */ 0);
 	if(!q->measured_local_resources->exit_type)
 		q->measured_local_resources->exit_type = xxstrdup("normal");
 
@@ -6545,13 +6566,47 @@ static work_queue_task_state_t change_task_state( struct work_queue *q, struct w
 	work_queue_task_state_t old_state = (uintptr_t) itable_lookup(q->task_state_map, t->taskid);
 	itable_insert(q->task_state_map, t->taskid, (void *) new_state);
 
+	struct category *c = work_queue_category_lookup_or_create(q, t->category);
+
+	/* XXX: update manager task count in the same way */
+	switch(old_state) {
+		case WORK_QUEUE_TASK_UNKNOWN:
+			break;
+		case WORK_QUEUE_TASK_READY:
+			c->wq_stats->tasks_waiting--;
+			break;
+		case WORK_QUEUE_TASK_RUNNING:
+			c->wq_stats->tasks_running--;
+			break;
+		case WORK_QUEUE_TASK_WAITING_RETRIEVAL:
+			c->wq_stats->tasks_with_results--;
+			break;
+		case WORK_QUEUE_TASK_RETRIEVED:
+			break;
+		case WORK_QUEUE_TASK_DONE:
+			break;
+		case WORK_QUEUE_TASK_CANCELED:
+			break;
+	}
+
 	// insert to corresponding table
 	debug(D_WQ, "Task %d state change: %s (%d) to %s (%d)\n", t->taskid, task_state_str(old_state), old_state, task_state_str(new_state), new_state);
 
 	switch(new_state) {
+		case WORK_QUEUE_TASK_UNKNOWN:
+			break;
 		case WORK_QUEUE_TASK_READY:
+			c->wq_stats->tasks_waiting++;
 			update_task_result(t, WORK_QUEUE_RESULT_UNKNOWN);
 			push_task_to_ready_list(q, t);
+			break;
+		case WORK_QUEUE_TASK_RUNNING:
+			c->wq_stats->tasks_running++;
+			break;
+		case WORK_QUEUE_TASK_WAITING_RETRIEVAL:
+			c->wq_stats->tasks_with_results++;
+			break;
+		case WORK_QUEUE_TASK_RETRIEVED:
 			break;
 		case WORK_QUEUE_TASK_CANCELED:
 			// Remove task from ready list if it's there
@@ -6561,10 +6616,10 @@ static work_queue_task_state_t change_task_state( struct work_queue *q, struct w
 			fill_deprecated_tasks_stats(t);
 			itable_remove(q->tasks, t->taskid);
 			break;
-		default:
-			/* do nothing */
-			break;
 	}
+
+	c->wq_stats->tasks_on_workers = c->wq_stats->tasks_running + c->wq_stats->tasks_with_results;
+	c->wq_stats->tasks_submitted = c->total_tasks + c->wq_stats->tasks_waiting + c->wq_stats->tasks_on_workers;
 
 	log_queue_stats(q, 0);
 	write_transaction_task(q, t);
@@ -7072,8 +7127,9 @@ struct work_queue_task *work_queue_wait_internal(struct work_queue *q, int timeo
 			update_catalog(q, foreman_uplink, 0);
 		}
 
-		if(q->monitor_mode)
+		if(q->monitor_mode) {
 			update_resource_report(q);
+		}
 
 		END_ACCUM_TIME(q, time_internal);
 
@@ -7217,8 +7273,8 @@ struct work_queue_task *work_queue_wait_internal(struct work_queue *q, int timeo
 	return t;
 }
 
-//check if workers' resources are available to execute more tasks
-//queue should have at least q->hungry_minimum ready tasks
+//check if workers' resources are available to execute more tasks queue should
+//have at least MAX(hungry_minimum, hungry_minimum_factor * number of workers) ready tasks
 //@param: 	struct work_queue* - pointer to queue
 //@return: 	1 if hungry, 0 otherwise
 int work_queue_hungry(struct work_queue *q)
@@ -7232,8 +7288,8 @@ int work_queue_hungry(struct work_queue *q)
 	struct work_queue_stats qstats;
 	work_queue_get_stats(q, &qstats);
 
-	//if number of ready tasks is less than q->hungry_minimum, then queue is hungry
-	if (qstats.tasks_waiting < q->hungry_minimum){
+	//if number of ready tasks is less than minimum, then queue is hungry
+	if (qstats.tasks_waiting < MAX(q->hungry_minimum, q->hungry_minimum_factor * hash_table_size(q->worker_table))){
 		return 1;
 	}
 
@@ -7514,6 +7570,9 @@ int work_queue_tune(struct work_queue *q, const char *name, double value)
 	} else if(!strcmp(name, "hungry-minimum")) {
 		q->hungry_minimum = MAX(1, (int)value);
 
+	} else if(!strcmp(name, "hungry-minimum-factor")) {
+		q->hungry_minimum_factor = MAX(1, (int)value);
+
 	} else if(!strcmp(name, "wait-for-workers")) {
 		q->wait_for_workers = MAX(0, (int)value);
 
@@ -7528,9 +7587,10 @@ int work_queue_tune(struct work_queue *q, const char *name, double value)
 
 	} else if(!strcmp(name, "force-proportional-resources-whole-tasks") || !strcmp(name, "proportional-whole-tasks")) {
 		q->proportional_whole_tasks = MAX(0, (int)value);
-	} else if (!strcmp(name, "monitor-interval")) {
-		/* 0 means use monitor's default */
-		q->monitor_interval = MAX(0, (int)value);
+
+	} else if (!strcmp(name, "ramp-down-heuristic")) {
+		q->ramp_down_heuristic = MAX(0, (int)value);
+
 	} else {
 		debug(D_NOTICE|D_WQ, "Warning: tuning parameter \"%s\" not recognized\n", name);
 		return -1;
@@ -7770,13 +7830,6 @@ void work_queue_get_stats_category(struct work_queue *q, const char *category, s
 	struct category *c = work_queue_category_lookup_or_create(q, category);
 	struct work_queue_stats *cs = c->wq_stats;
 	memcpy(s, cs, sizeof(*s));
-
-	//info about tasks
-	s->tasks_waiting      = task_state_count(q, category, WORK_QUEUE_TASK_READY);
-	s->tasks_running      = task_state_count(q, category, WORK_QUEUE_TASK_RUNNING);
-	s->tasks_with_results = task_state_count(q, category, WORK_QUEUE_TASK_WAITING_RETRIEVAL);
-	s->tasks_on_workers   = s->tasks_running + s->tasks_with_results;
-	s->tasks_submitted    = c->total_tasks + s->tasks_waiting + s->tasks_on_workers;
 
 	s->workers_able  = count_workers_for_waiting_tasks(q, largest_seen_resources(q, c->name));
 }
@@ -8236,6 +8289,12 @@ int work_queue_specify_category_mode(struct work_queue *q, const char *category,
 	}
 
 	return 1;
+}
+
+void work_queue_specify_category_max_concurrent(struct work_queue *q, const char *category, int max_concurrent) {
+	struct category *c = work_queue_category_lookup_or_create(q, category);
+
+	c->max_concurrent = MAX(-1, max_concurrent);
 }
 
 int work_queue_enable_category_resource(struct work_queue *q, const char *category, const char *resource, int autolabel) {

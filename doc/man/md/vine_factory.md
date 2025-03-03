@@ -32,7 +32,7 @@
 ## DESCRIPTION
 **vine_factory** submits and maintains a number
 of [vine_worker(1)](vine_worker.md) processes on various batch systems, such as
-Condor and SGE.  All the workers managed by a **vine_factory** process
+Condor and UGE.  All the workers managed by a **vine_factory** process
 will be directed to work for a specific manager, or any set of managers matching
 a given project name.  **vine_factory** will automatically determine
 the correct number of workers to have running, based on criteria set on
@@ -69,7 +69,7 @@ remove all running workers before exiting.
 General options:
 
 
-- **-T**,**--batch-type=_&lt;type&gt;_**<br /> Batch system type (required). One of: local, wq, condor, sge, pbs, lsf, torque, moab, mpi, slurm, chirp, amazon, amazon-batch, lambda, mesos, k8s, dryrun
+- **-T**,**--batch-type=_&lt;type&gt;_**<br /> Batch system type (required). One of: local, condor, vine, wq, uge, pbs, lsf, torque, moab, slurm, amazon, k8s, dryrun
 - **-C**,**--config-file=_&lt;file&gt;_**<br /> Use configuration file _&lt;file&gt;_.
 - **-M**,**--manager-name=_&lt;project&gt;_**<br /> Project name of managers to server, can be regex
 - **-F**,**--foremen-name=_&lt;project&gt;_**<br /> Foremen to serve, can be a regular expression.
@@ -82,8 +82,12 @@ Also configurable through environment variables **CCTOOLS_TEMP** or **TMPDIR**
 - **-d**,**--debug=_&lt;subsystem&gt;_**<br /> Enable debugging for this subsystem.
 - **-o**,**--debug-file=_&lt;file&gt;_**<br /> Send debugging to this file.
 - **-O**,**--debug-file-size=_&lt;mb&gt;_**<br /> Specify the size of the debug file.
+- **--ssl**<br />Enable tls connection to manager (manager should support it).
+- **--tls-sni=_&lt;&gt;_**<br />SNI domain name if different from manager hostname. Implies --ssl.
 - **-v**,**--version**<br /> Show the version string.
 - **-h**,**--help**<br /> Show this screen.
+- **--debug-workers**<br /> Bring the woker logs back to the scratch directory, usually work with **--single-shot**
+- **--single-shot**<br /> Shut down workers gracefully once their connected manager is done
 
 
 Concurrent control options:
@@ -145,10 +149,10 @@ To maintain workers for barney, do this:
 vine_factory -T condor -M barney
 ```
 
-To maintain a maximum of 100 workers on an SGE batch system, do this:
+To maintain a maximum of 100 workers on an UGE batch system, do this:
 
 ```
-vine_factory -T sge -M barney -W 100
+vine_factory -T uge -M barney -W 100
 ```
 
 To start workers such that the workers exit after 5 minutes (300s) of idleness:
@@ -169,6 +173,8 @@ If running on condor, you may manually specify condor requirements:
 ```
 vine_factory -T condor -M barney --condor-requirements 'MachineGroup == "disc"' --condor-requirements 'has_matlab == true'
 ```
+
+If 
 
 Repeated uses of **condor-requirements** are and-ed together. The previous example will produce a statement equivalent to:
 

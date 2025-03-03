@@ -60,9 +60,6 @@ int main(int argc, char *argv[])
 	struct vine_task *t;
 	int i,j ;
 
-	//runtime logs will be written to vine_example_gutenberg_info/%Y-%m-%dT%H:%M:%S
-	vine_set_runtime_info_path("vine_example_gutenberg_info");
-
 	m = vine_create(VINE_DEFAULT_PORT);
 	if(!m) {
 		printf("couldn't create manager: %s\n", strerror(errno));
@@ -71,11 +68,11 @@ int main(int argc, char *argv[])
 	printf("listening on port %d...\n", vine_port(m));
 
 	printf("setting up input files...\n");
-	struct vine_file *script = vine_declare_buffer(m, compare_script, strlen(compare_script), VINE_CACHE);
+	struct vine_file *script = vine_declare_buffer(m, compare_script, strlen(compare_script), VINE_CACHE_LEVEL_WORKFLOW, 0);
 	struct vine_file *files[URL_COUNT];
 
 	for(i=0;i<URL_COUNT;i++) {
-		files[i] = vine_declare_url(m, urls[i], VINE_CACHE);
+		files[i] = vine_declare_url(m, urls[i], VINE_CACHE_LEVEL_FOREVER, 0);
 	}
 
 	printf("submitting tasks...\n");
@@ -119,4 +116,4 @@ int main(int argc, char *argv[])
 	return 0;
 }
 
-/* vim: set noexpandtab tabstop=4: */
+/* vim: set noexpandtab tabstop=8: */

@@ -38,10 +38,17 @@
 # - @ref ndcctools.taskvine.dask_executor.DaskVine "vine.DaskVine"
 #
 
+import warnings
 
 from .manager import (
     Manager,
     Factory,
+)
+from .futures import (
+    FuturesExecutor,
+    FuturePythonTask,
+    FutureFunctionCall,
+    VineFuture,
 )
 from .file import File
 from .task import (
@@ -51,18 +58,29 @@ from .task import (
     LibraryTask,
     FunctionCall,
 )
+from . import cvine
+
+
+class DaskVineWarning(UserWarning):
+    pass
+
 
 try:
+    import dask
+    from packaging.version import Version
+    vd = Version(dask.__version__)
+    vr = Version("2024.12.0")
+    if vd < vr:
+        raise ImportError
+
     from .dask_executor import DaskVine
-except ImportError as e:
-    print(f"DaskVine not available. Couldn't find module: {e.name}")
-    ## DaskVine compatibility class.
-    # See @ref dask_executor.DaskVine
-    class DaskVine:
-        exception = ImportError()
-        def __init__(*args, **kwargs):
-            raise DaskVine.exception
-    DaskVine.exception = e
+    from .dask_dag import DaskVineDag
+except (ImportError, ModuleNotFoundError):
+    warnings.warn("Dask >= 2024.12.0 not available, using DaskVine legacy task graph representation.", DaskVineWarning)
+
+    from .compat import DaskVine
+    from .compat import DaskVineDag
+
 
 __all__ = [
     "Manager",
@@ -70,9 +88,17 @@ __all__ = [
     "Factory",
     "LibraryTask",
     "FunctionCall",
+    "FuturesExecutor",
+    "FuturePythonTask",
+    "FutureFunctionCall",
+    "VineFuture",
     "Task",
     "PythonTask",
     "PythonTaskNoResult",
     "DaskVine",
+    "DaskVineDag",
 ]
 
+__version__ = cvine.vine_version_string()
+
+# vim: set sts=4 sw=4 ts=4 expandtab ft=python:

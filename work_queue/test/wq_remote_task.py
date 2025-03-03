@@ -19,14 +19,13 @@ def kwargs_test(x=5, y=6, z=7):
 def no_arguments_test(a, b, c):
     return a + b + c
 def exception_test():
-    raise Exception("I am a bad funtion")
+    raise Exception("I am a bad function")
 
 # Create a new queue
-queue = wq.WorkQueue(port=[9123,9130])
+queue = wq.WorkQueue(port=0, debug_log="manager.log")
 print("listening on port {}".format(queue.port))
 with open(port_file, "w") as f:
     f.write(str(queue.port))
-
 
 # Submit several tasks for execution:
 print("submitting tasks...")
@@ -110,3 +109,4 @@ assert(multiply_sum == 285)
 assert(kwargs_sum == 63)
 assert(no_arguments_errors == 9)
 assert(num_exceptions == 9)
+# vim: set sts=4 sw=4 ts=4 expandtab ft=python:

@@ -72,7 +72,7 @@ if __name__ == "__main__":
         m.disable_peer_transfers()
 
     # declare all urls in the manager:
-    urls = map(lambda u: m.declare_url(u, cache=True), urls_sources)
+    urls = map(lambda u: m.declare_url(u, cache="forever"), urls_sources)
 
     # script to process the files
     my_script = m.declare_buffer(compare_script, cache=True)
@@ -105,3 +105,4 @@ if __name__ == "__main__":
                 print(f"task {t.id} failed with status {t.result}")
 
     print("all tasks complete!")
+# vim: set sts=4 sw=4 ts=4 expandtab ft=python:

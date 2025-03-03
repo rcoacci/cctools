@@ -19,9 +19,8 @@ You may already have Conda installed.  To check:
 $ conda -V
 ```
 
-This displays the version of conda currently installed. If it fails, then you should install [Miniconda](https://docs.conda.io/projects/conda/en/latest/user-guide/install).
-Miniconda is a __light__ version of Anaconda, and we recommend it as it is much faster to install.
-We also recommend installing the version for `Python 3.9`
+This displays the version of conda currently installed. If it fails, then you should install [Miniforge](https://github.com/conda-forge/miniforge#install).
+Miniforge is a __light__ version of Anaconda that uses the conda-forge channel by default, and we recommend it as it is much faster to install.
 
 Once Conda is installed, then install **CCTools** with:
 
@@ -57,17 +56,24 @@ software dependencies, and the easiest way to do this is to create
 a new `cctools-dev` environment via Conda:
 
 ```sh
+git clone git://github.com/cooperative-computing-lab/cctools.git cctools-src
+cd cctools-src
 unset PYTHONPATH
-conda create -y -n cctools-dev -c conda-forge --strict-channel-priority python=3 gcc_linux-64 gxx_linux-64 gdb m4 perl swig make zlib libopenssl-static openssl conda-pack packaging cloudpickle
+conda env create -y -f environment.yml
 conda activate cctools-dev
+```
+
+This can run slowly, so, for a potential speedup, try running:
+
+```sh
+unset PYTHONPATH
+conda env create -y -f environment.yml --experimental-solver=libmamba
 ```
 
 Now that you are inside the `cctools-dev` environment, you can check out
 the software repository and build it:
 
 ```sh
-git clone git://github.com/cooperative-computing-lab/cctools.git cctools-src
-cd cctools-src
 ./configure --with-base-dir $CONDA_PREFIX --prefix $CONDA_PREFIX
 make
 make install

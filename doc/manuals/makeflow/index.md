@@ -26,9 +26,8 @@ geography, and high energy physics all use Makeflow to compose workflows from
 existing applications.
 
 Makeflow can send your jobs to a wide variety of services, such as batch
-systems (HTCondor, SGE, PBS, LSF, Torque), task executors (TaskVine, Work Queue),
-cluster managers (Mesos and Kubernetes),
-cloud services (Amazon EC2 or Lambda) and container environments like Docker
+systems (HTCondor, UGE, SLURM, PBS, LSF, Torque), task executors (TaskVine, Work Queue),
+cluster managers (Kubernetes), cloud services (Amazon EC2) and container environments like Docker
 and Singularity. Details for each of those systems are given in the Batch
 System Support section.
 
@@ -36,7 +35,7 @@ System Support section.
 
 ### Installing
 
-See the [Installation Instructions](../install) for the Cooperative Computing Tools package.  Then, Make sure to set your `PATH` appropriately.
+See the [Installation Instructions](../install/index.md) for the Cooperative Computing Tools package.  Then, Make sure to set your `PATH` appropriately.
 
 ### Basic Usage
 
@@ -63,7 +62,7 @@ them to run on the controlling machine.
 ```make
 CURL=/usr/bin/curl
 CONVERT=/usr/bin/convert
-URL="http://ccl.cse.nd.edu/images/capitol.jpg"
+URL="https://ccl.cse.nd.edu/images/capitol.jpg"
 
 capitol.anim.gif: capitol.jpg capitol.90.jpg capitol.180.jpg capitol.270.jpg capitol.360.jpg
     LOCAL $(CONVERT) -delay 10 -loop 0 capitol.jpg capitol.90.jpg capitol.180.jpg capitol.270.jpg capitol.360.jpg capitol.270.jpg capitol.180.jpg capitol.90.jpg capitol.anim.gif
@@ -107,14 +106,14 @@ Use the `--clean` option to clean everything up before trying it again:
 $ makeflow --clean example.makeflow
 ```
 
-If you have access to a batch system like Condor, SGE, or Torque, or a cloud
+If you have access to a batch system like Condor, UGE, or Torque, or a cloud
 service provider like Amazon, you can direct Makeflow to run your jobs there
 by using the `-T` option:
 
 ```sh
 $ makeflow -T condor example.makeflow
 
-$ makeflow -T sge example.makeflow
+$ makeflow -T uge example.makeflow
 
 $ makeflow -T torque example.makeflow
 
@@ -150,7 +149,7 @@ using JX:
 You can use the JX language with Makeflow by simply using
 the `--jx` argument to any invocation. For example: `makeflow --jx example.jx -T condor`
 
-Learn more about JX [here](../jx-workflow).
+Learn more about JX [here](../jx-workflow/index.md).
 
 
 ### Resources
@@ -198,7 +197,7 @@ $ makeflow_graph_log example.makeflow.makeflowlog example.png
     [Visualization](#visualization).
 
 In addition, if you give the workflow a "project name" with the `-N` option,
-it will report its status to the [catalog server](../catalog) once per
+it will report its status to the [catalog server](../catalog/index.md) once per
 minute. The `makeflow_status` command will query the catalog and summarize
 your currently running workloads, like this:
 
@@ -320,9 +319,8 @@ BATCH_OPTIONS="Requirements = (Memory>1024)"
 
 ### UGE - Univa Grid Engine / OGE - Open Grid Engine / SGE - Sun Grid Engine
 
-Use the `-T sge` option to submit jobs to Sun Grid Engine or systems derived
-from it like [Open Grid Scheduler](http://gridscheduler.sourceforge.net) or
-[Univa Grid Engine](http://www.univa.com/products/).
+Use the `-T uge` option to submit jobs to [Univa Grid Engine](http://www.univa.com/products/)
+or its predecessors like Open Grid Scheduler or Sun Grid Engine. (`-T sge` is a synonym for backwards compatibility.)
 
 As above, Makeflow will automatically generate `qsub` commands. Use the `-B`
 option or `BATCH_OPTIONS` variable to specify text to add to the command line.
@@ -446,76 +444,24 @@ output: input
     srun $(BATCH_OPTIONS) --mpi=pmi2 -- ./my-mpi-job -i input -o output
 ```
 
+### Flux
+
+The [Flux resource manager](https://flux-framework.readthedocs.io/en/latest/)
+is available as an experimental backend by passing the `-T flux` option.
+
+To use the Flux batch system, you must run Makeflow in a shell connected to a
+Flux instance (i.e. `$FLUX_URI` must be set and valid). This is validated by
+ensuring `flux uptime` runs successfully.
+
+While the Flux backend supports staging in files into the execution
+environment, it currently does not support staging files out, instead assuming
+a shared filesystem. Simple programs that use `batch_job` but do not require
+output files, like `vine_factory`, should work fine.
 
 ### Moab Scheduler
 
 Use the `-T moab` option to submit jobs to the Moab scheduler or compatible
 systems.
-
-### MPI Makeflow
-
-An alternate method of using Makeflow on an HPC system is to submit Makeflow
-itself as one large parallel job. Makeflow will then use the MPI (Message
-Passing Interface) to communicate between nodes and dispatch each task in the
-workflow to nodes as needed. The entire "job" will return when the workflow is
-complete. This mode assumes that there exists a shared parallel filesystem
-mounted across all nodes in the system.
-
-To use this option, Makeflow must be built from source to take advantage of
-the specialized MPI compilers and libraries available on your machine. First,
-consult your local documentation on how to set up access to your MPI compiler,
-typically named `mpicc`. Then, configure and build Makeflow using the `--with-
-mpi-path` option, like this:
-
-```sh
-$ git clone http://github.com/cooperative-computing-lab/cctools cctools-src
-$ cd cctools-src
-$ ./configure --with-mpi-path `which mpicc` --prefix $HOME/cctools
-$ make clean
-$ make install
-$ export PATH=$HOME/cctools/bin:$PATH
-```
-
-You can test this configuration locally at small scale using `mpirun`. For
-example, to run makeflow on four MPI nodes:
-
-```sh
-$ mpirun -np 4 makeflow -T mpi example.makeflow
-```
-
-Then, consult your local documentation on how to submit an MPI job to your
-cluster. This varies considerably between sites, but here is a typical example
-of a script for a system that uses a `qsub` style interface and `modules` for
-loading software:
-
-    
-```sh
-#!/bin/bash
-#$ -pe mpi 48
-module load ompi
-mpirun -np $NSLOTS makeflow -T mpi example.makeflow
-```
-
-
-### Mesos
-
-Makeflow can be used with Apache Mesos. To run Makeflow with Mesos, give the
-batch mode via `-T mesos` and pass the hostname and port number of Mesos
-manager to Makeflow with the `--mesos-master` option. Since the Makeflow-Mesos
-Scheduler is based on Mesos Python2 API, the path to Mesos Python2 library
-should be included in the `$PATH`, or one can specify a preferred Mesos
-Python2 API via ` --mesos-path ` option. To successfully import the Python
-library, you may need to indicate dependencies through `--mesos-preload `
-option.
-
-For example, here is the command to run Makeflow on a Mesos cluster that has
-the manager listening on port 5050 of localhost, with a user specified python
-library:
-
-```sh
-$ makeflow -T mesos --mesos-master localhost:5050 --mesos-path /path/to/mesos-0.26.0/lib/python2.6/site-packages example.makeflow ...
-```
-
 
 ### Kubernetes
 
@@ -593,46 +539,13 @@ variables within the Makeflow file. For example:
 $ export AMAZON_INSTANCE_TYPE=m4.4xlarge export AMAZON_AMI=ami-343a694f
 ```
 
-
-### Amazon Lambda
-
-To use Amazon Lambda, first set up an AWS account and install the `aws`
-command line tools as noted above.
-
-Then, use the `makeflow_lambda_setup` command, which will establish the
-appropriate roles, buckets, and functions needed to use Amazon Lambda. The
-names of these items will be stored in a config file named on the command
-line:
-
-```sh
-$ makeflow_lambda_setup my.config
-```
-
-Then, you may use `makeflow` normally, indicating `lambda` as the batch type,
-and passing in the configuration file with the `--lambda-config` option:
-
-    
-```sh
-$ makeflow -T lambda --lambda-config my.config example.makeflow ...
-```
-
-You may run multiple workflows in this fashion. When you are ready to clean up
-the associated state in Amazon, run `makeflow_lambda_cleanup` and pass in the
-configuration file:
-
-    
-```sh    
-$ makeflow_lambda_cleanup my.config
-```
-    
-
 ### Generic Cluster Submission
 
 For clusters that are not directly supported by Makeflow we strongly suggest
-using the [TaskVine](../taskvine) system and
+using the [TaskVine](../taskvine/index.md) system and
 submitting workers via the cluster's normal submission mechanism.
 
-However, if you have a system similar to Torque, SGE, or PBS which submits
+However, if you have a system similar to Torque, UGE, or PBS which submits
 jobs with commands like "qsub", you can inform Makeflow of those commands and
 use the `cluster` driver. For this to work, it is assumed there is a
 distributed filesystem shared (like NFS) shared across all nodes of the
@@ -667,7 +580,7 @@ take 30 seconds or more for the batch system to start an individual job. If
 common files are needed by each job, they may end up being transferred to the
 same node multiple times.
 
-To get around these limitations, we provide the [TaskVine](../taskvine) system.
+To get around these limitations, we provide the [TaskVine](../taskvine/index.md) system.
 The basic idea is
 to submit a number of persistent "worker" processes to an existing batch
 system. Makeflow communicates directly with the workers to quickly dispatch
@@ -692,10 +605,10 @@ Logging submit event(s)..........
 10 job(s) submitted to cluster 298.
 ```
 
-Or, submit 10 worker processes to SGE like this:
+Or, submit 10 worker processes to UGE like this:
 
 ```sh
-$ vine_submit_workers -T sge head.cluster.edu 9123 10
+$ vine_submit_workers -T uge head.cluster.edu 9123 10
 ```
 
 Or, you can start workers manually on any other machine you can log into:
@@ -715,7 +628,7 @@ will automatically exit.
 
 Note that `vine_submit_workers` is a simple shell script,
 so you can edit it directly if you would like to change batch
-options or other details. Please refer to the [TaskVine manual ](../taskvine) for more details.
+options or other details. Please refer to the [TaskVine manual ](../taskvine/index.md) for more details.
 
 ### Port Numbers
 
@@ -769,7 +682,7 @@ Server address are taken from the environment variables **CATALOG_HOST** and
 `catalog.cse.nd.edu,backup-catalog.cse.nd.edu` and port `9097` will be used.
 
 It is also easy to run your own catalog server, if you prefer. For more
-details, see the [Catalog Server Manual](../catalog).
+details, see the [Catalog Server Manual](../catalog/index.md).
 
 ### Setting a Password
 
@@ -781,6 +694,26 @@ file:
 ```sh
 $ makeflow --password mypwfile ...
 $ vine_worker --password mypwfile ...
+```
+
+### SSL Encryption
+
+We also recommend the use of SSL for encrypting the manager-worker connection
+when operating on a wide area network.
+
+If you do not have a key and certificate at hand, but you want the
+communications to be encrypted, you can create your own key and certificate like this:
+
+```sh
+openssl req -x509 -newkey rsa:4096 -keyout MY_KEY.pem -out MY_CERT.pem -sha256 -days 365 -nodes
+```
+
+To activate SSL encryption, indicate the paths to the key and certificate when
+running `makeflow` as well as the workers:
+
+```sh
+$ makeflow --ssl-key MY_KEY.pem --ssl-cert MY_CERT.pem ...
+$ vine_worker --ssl ...
 ```
 
 ## Container Environments
@@ -1319,7 +1252,7 @@ export USER
 When the underlying batch system supports it, Makeflow supports "Remote
 Renaming" where the name of a file in the execution sandbox is different than
 the name of the same file in the DAG. This is currently supported by the
-TaskVine, Work Queue, HTCondor, and Amazon batch system.
+TaskVine, Work Queue, HTCondor, and Amazon batch systems.
 
 For example, `local_name->remote_name` indicates that the file `local_name` is
 called `remote_name` in the remote system. Consider the following example:
@@ -1444,7 +1377,7 @@ Makeflow, starting with zero. Each line contains the following items:
     2. complete 
     3. failed 
     4. aborted 
-  * **job id** \- the underline execution system is a batch system, such as Condor or SGE, the job id would be the job id assigned by the batch system when the task was sent to the batch system for execution.
+  * **job id** \- the underline execution system is a batch system, such as Condor or UGE, the job id would be the job id assigned by the batch system when the task was sent to the batch system for execution.
   * **tasks waiting** \- the number of tasks are waiting to be executed.
   * **tasks running** \- the number of tasks are being executed.
   * **tasks complete** \- the number of tasks has been completed.
@@ -1516,7 +1449,7 @@ Each file state line records the state change and time:
 
 ## Further Information
 
-For more information, please see [Getting Help](../help) or visit the [Cooperative Computing Lab](http://ccl.cse.nd.edu) website.
+For more information, please see [Getting Help](../help.md) or visit the [Cooperative Computing Lab](http://ccl.cse.nd.edu) website.
 
 ## Copyright
 

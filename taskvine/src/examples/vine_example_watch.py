@@ -49,7 +49,7 @@ if __name__ == "__main__":
 
         t.add_input(script, "trickle.sh")
 
-        output = m.declare_file(f"output.{i}")
+        output = m.declare_file(f"output.{i}", cache=True)
         t.add_output(output, "output", watch=True)
 
         t.set_cores(1)
@@ -77,3 +77,4 @@ if __name__ == "__main__":
                 pass
 
     print("All tasks complete!")
+# vim: set sts=4 sw=4 ts=4 expandtab ft=python:

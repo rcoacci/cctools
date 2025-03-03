@@ -24,7 +24,6 @@
 
 import fcntl
 import functools
-import json
 import multiprocessing
 import os
 import signal
@@ -32,7 +31,7 @@ import struct
 import tempfile
 import threading
 
-from .cresource_monitor import (
+from .cresource_monitor import (  # noqa: F401
     CATEGORY_ALLOCATION_MODE_FIXED,
     CATEGORY_ALLOCATION_MODE_MAX_THROUGHPUT,
     CATEGORY_ALLOCATION_MODE_MIN_WASTE,
@@ -55,6 +54,7 @@ from .cresource_monitor import (
     rmsummary_create,
     rmsummary_delete,
     rmsummary_copy,
+    rmsummary_get_snapshot,
     rmsummary_merge_max,
     rmsummaryArray_getitem,
     delete_rmsummaryArray,
@@ -186,7 +186,7 @@ class ResourceInternalError(Exception):
 
 
 def __measure_update_to_peak(pid, old_summary=None):
-    new_summary = rmonitor_measure_process(pid)
+    new_summary = rmonitor_measure_process(pid, 1)
 
     if old_summary is None:
         return new_summary
@@ -232,6 +232,9 @@ def __read_pids_file(pids_file):
                 rmonitor_minimonitor(MINIMONITOR_REMOVE_PID, -pid)
 
 
+_watchman_counter = 0
+
+
 def _watchman(results_queue, limits, callback, interval, function, args, kwargs):
     try:
         # child_finished is set when the process running function exits
@@ -245,7 +248,10 @@ def _watchman(results_queue, limits, callback, interval, function, args, kwargs)
         fun_proc = multiprocessing.Process(target=_wrap_function(local_results, function, args, kwargs))
 
         # unique name for this function invocation
-        fun_id = str(hash(json.dumps({'args': args, 'kwargs': kwargs}, sort_keys=True)))
+        # fun_id = str(hash(json.dumps({'args': args, 'kwargs': kwargs}, sort_keys=True)))
+        global _watchman_counter
+        _watchman_counter += 1
+        fun_id = str(hash(_watchman_counter))
 
         # convert limits to the structure the minimonitor accepts
         if limits:
@@ -623,5 +629,6 @@ def rmsummary_snapshots(self):
         snapshot = rmsummary_get_snapshot(self, i)
         snapshots.append(snapshot)
     return snapshots
+
 
 rmsummary.snapshots = property(rmsummary_snapshots)

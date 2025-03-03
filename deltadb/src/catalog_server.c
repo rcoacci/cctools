@@ -85,7 +85,10 @@ static const char *ssl_cert_filename = 0;
 /* Filename containing the SSL private key. */
 static const char *ssl_key_filename = 0;
 
-/* The file for writing out the port number. */
+/* The file for writing out the SSL port number. */
+const char *ssl_port_file = 0;
+
+/* The file for writing out the query port number. */
 const char *port_file = 0;
 
 /* The preferred hostname set on the command line. */
@@ -434,8 +437,16 @@ void send_http_response( struct link *l, int code, const char *message, const ch
 	link_printf(l,stoptime, "Server: catalog_server\n");
 	link_printf(l,stoptime, "Connection: close\n");
 	link_printf(l,stoptime, "Access-Control-Allow-Origin: *\n");
-	link_printf(l,stoptime, "Content-type: %s\n\n",content_type);
+	link_printf(l,stoptime, "Content-type: %s; charset=utf-8\n\n",content_type);
 	link_flush_output(l);
+}
+
+void send_html_header( struct link *l, time_t stoptime )
+{
+	link_printf(l,stoptime, "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01//EN\" \"http://www.w3.org/TR/html4/strict.dtd\">\n");
+	link_printf(l,stoptime, "<head>\n");
+	link_printf(l,stoptime, "<title>%s catalog server</title>\n", preferred_hostname);
+	link_printf(l,stoptime, "</head>\n");
 }
 
 static void handle_query( struct link *ql, time_t st )
@@ -469,10 +480,12 @@ static void handle_query( struct link *ql, time_t st )
 
 		// Consume the rest of the query
 		while(1) {
+			/* If we read to end-of-stream on the request, that's ok. */
 			if(!link_readline(ql, line, LINE_MAX, time(0) + HANDLE_QUERY_TIMEOUT)) {
-				return;
+				break;
 			}
 
+			/* If we get a blank line separator, proceed to respond. */
 			if(line[0] == 0) {
 				break;
 			}
@@ -606,7 +619,7 @@ static void handle_query( struct link *ql, time_t st )
 			const char *name = jx_lookup_string(j, "name");
 			if(!name)
 				name = "unknown";
-			link_printf(ql,st, "<title>%s catalog server: %s</title>\n", preferred_hostname, name);
+			send_html_header(ql,st);
 			link_printf(ql,st, "<center>\n");
 			link_printf(ql,st, "<h1>%s catalog server</h1>\n", preferred_hostname);
 			link_printf(ql,st, "<h2>%s</h2>\n", name);
@@ -618,7 +631,7 @@ static void handle_query( struct link *ql, time_t st )
 			catalog_export_html_solo(j, ql,st);
 			link_printf(ql,st, "</center>\n");
 		} else {
-			link_printf(ql,st, "<title>%s catalog server</title>\n", preferred_hostname);
+			send_html_header(ql,st);
 			link_printf(ql,st, "<center>\n");
 			link_printf(ql,st, "<h1>%s catalog server</h1>\n", preferred_hostname);
 			link_printf(ql,st, "<h2>Unknown Item!</h2>\n");
@@ -632,7 +645,7 @@ static void handle_query( struct link *ql, time_t st )
 		INT64_T sum_devices = 0;
 
 		send_http_response(ql,200,"OK","text/html",st);
-		link_printf(ql,st, "<title>%s catalog server</title>\n", preferred_hostname);
+		send_html_header(ql,st);
 		link_printf(ql,st, "<center>\n");
 		link_printf(ql,st, "<h1>%s catalog server</h1>\n", preferred_hostname);
 		if (timestamp) {
@@ -752,6 +765,7 @@ static void show_help(const char *cmd)
 	fprintf(stdout, " %-30s Send status updates at this interval.\n", "-U,--update-interval=<time>");
 	fprintf(stdout, " %-30s (default is 5m)\n", "");
 	fprintf(stdout, " %-30s Show version string\n", "-v,--version");
+	fprintf(stdout, " %-30s Select SSL port at random and write it to\n", "-Y,--ssl-port-file=<file>");
 	fprintf(stdout, " %-30s Select port at random and write it to\n", "-Z,--port-file=<file>");
 	fprintf(stdout, " %-30s this file. (default: disabled)\n", "");
 }
@@ -796,6 +810,7 @@ int main(int argc, char *argv[])
 		{"update-host", required_argument, 0, 'u'},
 		{"update-interval", required_argument, 0, 'U'},
 		{"version", no_argument, 0, 'v'},
+		{"ssl-port-file", required_argument, 0, 'Y'},
 		{"port-file", required_argument, 0, 'Z'},
 		{0,0,0,0}};
 
@@ -871,6 +886,10 @@ int main(int argc, char *argv[])
 			case 'v':
 				cctools_version_print(stdout, argv[0]);
 				return 0;
+			case 'Y':
+				ssl_port_file = optarg;
+				ssl_port = 0;
+				break;
 			case 'Z':
 				port_file = optarg;
 				port = 0;
@@ -936,7 +955,6 @@ int main(int argc, char *argv[])
 
 	if(ssl_port || ssl_key_filename || ssl_cert_filename) {
 
-		if(!ssl_port) fatal("--ssl-port is also required for SSL.");
 		if(!ssl_key_filename) fatal("--ssl-key is also required for SSL.");
 		if(!ssl_cert_filename) fatal("--ssl-cert is also required for SSL.");
 
@@ -973,6 +991,7 @@ int main(int argc, char *argv[])
 	}
 
 	opts_write_port_file(port_file,port);
+	opts_write_port_file(ssl_port_file,ssl_port);
 
 	while(1) {
 		fd_set rfds;

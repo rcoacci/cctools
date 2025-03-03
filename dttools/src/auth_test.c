@@ -103,7 +103,7 @@ int main(int argc, char *argv[])
 
 		link = link_connect(addr, portnum, stoptime);
 		if(!link)
-			fatal("couldn't connect to %s:%d: %s", hostname, portnum, strerror(errno));
+			fatal("auth_test: couldn't connect to %s:%d: %s", hostname, portnum, strerror(errno));
 
 		if(auth_assert(link, &type, &subject, stoptime)) {
 			printf("server thinks I am %s %s\n", type, subject);
@@ -143,4 +143,4 @@ int main(int argc, char *argv[])
 	return 0;
 }
 
-/* vim: set noexpandtab tabstop=4: */
+/* vim: set noexpandtab tabstop=8: */

@@ -288,7 +288,7 @@ static int64_t measure_worker_disk()
 {
 	static struct path_disk_size_info *state = NULL;
 
-	path_disk_size_info_get_r("./cache", max_time_on_measurement, &state);
+	path_disk_size_info_get_r("./cache", max_time_on_measurement, &state, NULL);
 
 	int64_t disk_measured = 0;
 	if(state->last_byte_size_complete >= 0) {
@@ -2054,7 +2054,7 @@ static int serve_manager_by_hostport( const char *host, int port, const char *ve
 		link_close(manager);
 		return 0;
 	} else if(manual_ssl_option || use_ssl) {
-		if(link_ssl_wrap_connect(manager) < 1) {
+		if(link_ssl_wrap_connect(manager, host) < 1) {
 			fprintf(stderr,"work_queue_worker: could not setup ssl connection.\n");
 			link_close(manager);
 			return 0;
@@ -2141,38 +2141,40 @@ int serve_manager_by_hostport_list(struct list *manager_addresses, int use_ssl)
 	return result;
 }
 
-static struct list *interfaces_to_list(const char *addr, int port, struct jx *ifas)
+static struct list *interfaces_to_list(const char *canonical_host_or_addr, int port, struct jx *host_aliases)
 {
 	struct list *l = list_create();
-	struct jx *ifa;
+	struct jx *host_alias;
 
 	int found_canonical = 0;
 
-	if(ifas) {
-		for (void *i = NULL; (ifa = jx_iterate_array(ifas, &i));) {
-			const char *ifa_addr = jx_lookup_string(ifa, "host");
+	if(host_aliases) {
+		for (void *i = NULL; (host_alias = jx_iterate_array(host_aliases, &i));) {
+			const char *address = jx_lookup_string(host_alias, "address");
 
-			if(ifa_addr && strcmp(addr, ifa_addr) == 0) {
+			if(address && strcmp(canonical_host_or_addr, address) == 0) {
 				found_canonical = 1;
 			}
 
+			// copy ip addr to hostname to work as if the user had entered a particular ip
+			// for the manager.
 			struct manager_address *m = calloc(1, sizeof(*m));
-			strncpy(m->host, ifa_addr, LINK_ADDRESS_MAX);
+			strncpy(m->host, address, DOMAIN_NAME_MAX - 1);
 			m->port = port;
 
 			list_push_tail(l, m);
 		}
 	}
 
-	if(ifas && !found_canonical) {
-		warn(D_NOTICE, "Did not find the manager address '%s' in the list of interfaces.", addr);
+	if(host_aliases && !found_canonical) {
+		warn(D_NOTICE, "Did not find the manager address '%s' in the list of interfaces.", canonical_host_or_addr);
 	}
 
 	if(!found_canonical) {
 		/* We get here if no interfaces were defined, or if addr was not found in the interfaces. */
 
 		struct manager_address *m = calloc(1, sizeof(*m));
-		strncpy(m->host, addr, LINK_ADDRESS_MAX);
+		strncpy(m->host, canonical_host_or_addr, DOMAIN_NAME_MAX - 1);
 		m->port = port;
 
 		list_push_tail(l, m);
@@ -2205,7 +2207,7 @@ static int serve_manager_by_name( const char *catalog_hosts, const char *project
 		const char *name = jx_lookup_string(jx,"name");
 		const char *addr = jx_lookup_string(jx,"address");
 		const char *pref = jx_lookup_string(jx,"manager_preferred_connection");
-		struct jx *ifas  = jx_lookup(jx,"network_interfaces");
+		struct jx *host_aliases  = jx_lookup(jx,"network_interfaces");
 		int port = jx_lookup_integer(jx,"port");
 		int use_ssl = jx_lookup_boolean(jx,"ssl");
 
@@ -2243,7 +2245,7 @@ static int serve_manager_by_name( const char *catalog_hosts, const char *project
 			manager_addresses = interfaces_to_list(addr, port, NULL);
 		} else {
 			debug(D_WQ,"selected manager with project=%s addr=%s port=%d",project,addr,port);
-			manager_addresses = interfaces_to_list(addr, port, ifas);
+			manager_addresses = interfaces_to_list(addr, port, host_aliases);
 		}
 
 		result = serve_manager_by_hostport_list(manager_addresses, use_ssl);
@@ -2268,8 +2270,6 @@ static int serve_manager_by_name( const char *catalog_hosts, const char *project
 
 void set_worker_id()
 {
-	srand(time(NULL));
-
 	char *salt_and_pepper = string_format("%d%d%d", getpid(), getppid(), rand());
 	unsigned char digest[MD5_DIGEST_LENGTH];
 
@@ -2333,7 +2333,7 @@ struct list *parse_manager_addresses(const char *specs, int default_port)
 		}
 
 		struct manager_address *m = calloc(1, sizeof(*m));
-		strncpy(m->host, next_manager, LINK_ADDRESS_MAX);
+		strncpy(m->host, next_manager, DOMAIN_NAME_MAX - 1);
 		m->port = port;
 
 		if(port_str) {
@@ -2494,6 +2494,8 @@ int main(int argc, char *argv[])
 	catalog_hosts = CATALOG_HOST;
 
 	features = hash_table_create(4, 0);
+
+	random_init();
 
 	worker_start_time = timestamp_get();
 
@@ -2802,13 +2804,11 @@ int main(int argc, char *argv[])
 	signal(SIGQUIT, handle_abort);
 	signal(SIGINT, handle_abort);
 	//Also do cleanup on SIGUSR1 & SIGUSR2 to allow using -notify and -l s_rt= options if submitting 
-	//this worker process with SGE qsub. Otherwise task processes are left running when SGE
+	//this worker process with UGE qsub. Otherwise task processes are left running when UGE
 	//terminates this process with SIGKILL.
 	signal(SIGUSR1, handle_abort);
 	signal(SIGUSR2, handle_abort);
 	signal(SIGCHLD, handle_sigchld);
-
-	random_init();
 
 	if(!workspace_create()) {
 		fprintf(stderr, "work_queue_worker: failed to setup workspace at %s.\n", workspace);
@@ -2912,20 +2912,20 @@ int main(int argc, char *argv[])
 		else {
 			// if manual resource allocation, issue warning messages if the user overallocates worker resources
 			if ( (coprocess_cores * number_of_coprocess_instances) > total_resources->cores.total ) {
-				debug(D_WQ, "Warning: cores allocated to coprocesses is greater than cores allocated to worker\n");
+				debug(D_WQ|D_NOTICE, "Warning: cores allocated to coprocesses is greater than cores allocated to worker\n");
 			}
 			else if  ((coprocess_memory * number_of_coprocess_instances) > total_resources->memory.total ) {
-				debug(D_WQ, "Warning: memory allocated to coprocesses is greater than cores allocated to worker\n");
+				debug(D_WQ|D_NOTICE, "Warning: memory allocated to coprocesses is greater than cores allocated to worker\n");
 			}
 			else if  ((coprocess_disk * number_of_coprocess_instances) > total_resources->disk.total ) {
-				debug(D_WQ, "Warning: disk allocated to coprocesses is greater than cores allocated to worker\n");
+				debug(D_WQ|D_NOTICE, "Warning: disk allocated to coprocesses is greater than cores allocated to worker\n");
 			}
 			else if  ((coprocess_gpus * number_of_coprocess_instances) > total_resources->gpus.total ) {
-				debug(D_WQ, "Warning: gpus allocated to coprocesses is greater than cores allocated to worker\n");
+				debug(D_WQ|D_NOTICE, "Warning: gpus allocated to coprocesses is greater than cores allocated to worker\n");
 			}
 		}
 		coprocess_resources = work_queue_resources_create();
-		coprocess_info = work_queue_coprocess_initalize_all_coprocesses(coprocess_cores, coprocess_memory, coprocess_disk, coprocess_gpus, total_resources, coprocess_resources, coprocess_command, number_of_coprocess_instances);
+		coprocess_info = work_queue_coprocess_initialize_all_coprocesses(coprocess_cores, coprocess_memory, coprocess_disk, coprocess_gpus, total_resources, coprocess_resources, coprocess_command, number_of_coprocess_instances);
 		coprocess_name = xxstrdup(coprocess_info[0].name);
 		hash_table_insert(features, coprocess_name, (void **) 1);
 	}

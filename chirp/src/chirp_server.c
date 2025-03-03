@@ -8,7 +8,6 @@
 #include "chirp_alloc.h"
 #include "chirp_audit.h"
 #include "chirp_filesystem.h"
-#include "chirp_fs_confuga.h"
 #include "chirp_group.h"
 #include "chirp_job.h"
 #include "chirp_protocol.h"
@@ -30,9 +29,9 @@
 #include "getopt_aux.h"
 #include "host_disk_info.h"
 #include "host_memory_info.h"
-#include "json.h"
 #include "jx.h"
 #include "jx_print.h"
+#include "jx_parse.h"
 #include "link.h"
 #include "list.h"
 #include "load_average.h"
@@ -100,6 +99,7 @@ static const char *safe_username = 0;
 static int         sim_latency = 0;
 static int         stall_timeout = 3600; /* one hour */
 static time_t      starttime;
+static char       *ticket_duration_limit = 0;
 
 /* space_available() is a simple mechanism to ensure that a runaway client does
  * not use up every last drop of disk space on a machine.  This function
@@ -533,6 +533,22 @@ static INT64_T getvarstring (struct link *l, time_t stalltime, void *buffer, INT
 	}
 }
 
+static const char *impose_ticket_duration_limit(const char *duration_requested) {
+	if (!ticket_duration_limit) {
+		return duration_requested;
+	}
+
+	INT64_T requested = strtoul(duration_requested, NULL, 10);
+	INT64_T limit = strtoul(ticket_duration_limit, NULL, 10);
+
+	if (requested < limit) {
+		return duration_requested;
+	}
+
+	return ticket_duration_limit;
+}
+
+
 /* A note on integers:
  *
  * Various operating systems employ integers of different sizes for fields such
@@ -957,13 +973,6 @@ static void chirp_handler(struct link *l, const char *addr, const char *subject)
 		} else if(sscanf(line, "thirdput %s %s %s", path, chararg1, newpath) == 3) {
 			const char *hostname = chararg1;
 			path_fix(path);
-			if (cfs == &chirp_fs_confuga) {
-				/* Confuga cannot support thirdput because of auth problems,
-				 * see Authentication comment in chirp_receive.
-				 */
-				errno = EACCES;
-				goto failure;
-			}
 			/* ACL check will occur inside of chirp_thirdput */
 			result = chirp_thirdput(subject, path, hostname, newpath, stalltime);
 		} else if(sscanf(line, "open %s %s %" SCNd64, path, newpath, &mode) == 3) {
@@ -1269,7 +1278,7 @@ static void chirp_handler(struct link *l, const char *addr, const char *subject)
 			if ((length = getvarstring(l, stalltime, buffer, length, 0)) == -1)
 				goto failure;
 			char *newsubject = chararg1;
-			char *duration = chararg2;
+			const char *duration = impose_ticket_duration_limit(chararg2);
 			if(strcmp(newsubject, "self") == 0)
 				strcpy(newsubject, esubject);
 			if(strcmp(esubject, newsubject) != 0 && strcmp(esubject, chirp_super_user) != 0) {	/* must be superuser to create a ticket for someone else */
@@ -1569,10 +1578,10 @@ static void chirp_handler(struct link *l, const char *addr, const char *subject)
 			if ((length = getvarstring(l, stalltime, buffer, length, 0)) == -1)
 				goto failure;
 			debug(D_CHIRP, "--> job_create `%.*s'", (int)length, (char *)buffer);
-			json_value *J = json_parse(buffer, length);
-			if (J) {
-				result = chirp_job_create(&id, J, esubject);
-				json_value_free(J);
+			struct jx *j = jx_parse_string_and_length(buffer, length);
+			if (j) {
+				result = chirp_job_create(&id, j, esubject);
+				jx_delete(j);
 				if (result) {
 					errno = result;
 					goto failure;
@@ -1583,58 +1592,20 @@ static void chirp_handler(struct link *l, const char *addr, const char *subject)
 				errno = EINVAL;
 				goto failure;
 			}
-		} else if(sscanf(line, "job_commit %" PRId64, &length) == 1) {
-			if ((length = getvarstring(l, stalltime, buffer, length, 0)) == -1)
+		} else if(sscanf(line, "job_commit %" PRICHIRP_JOBID_T, &id) == 1) {
+			debug(D_CHIRP, "--> job_commit %" PRICHIRP_JOBID_T,id);
+			result = chirp_job_commit(id, esubject);
+		} else if(sscanf(line, "job_kill %" PRICHIRP_JOBID_T, &id) == 1) {
+			debug(D_CHIRP, "--> job_kill %" PRICHIRP_JOBID_T,id);
+			result = chirp_job_kill(id, esubject);
+		} else if(sscanf(line, "job_status %" PRICHIRP_JOBID_T, &id) == 1) {
+			debug(D_CHIRP, "--> job_status %" PRICHIRP_JOBID_T, id);
+			result = chirp_job_status(id, esubject, B);
+			if (result) {
+				errno = result;
 				goto failure;
-			debug(D_CHIRP, "--> job_commit `%.*s'", (int)length, (char *)buffer);
-			json_value *J = json_parse(buffer, length);
-			if (J) {
-				result = chirp_job_commit(J, esubject);
-				json_value_free(J);
-				if (result) {
-					errno = result;
-					goto failure;
-				}
 			} else {
-				debug(D_DEBUG, "does not parse as json!");
-				errno = EINVAL;
-				goto failure;
-			}
-		} else if(sscanf(line, "job_kill %" PRId64, &length) == 1) {
-			if ((length = getvarstring(l, stalltime, buffer, length, 0)) == -1)
-				goto failure;
-			debug(D_DEBUG, "--> job_kill `%.*s'", (int)length, (char *)buffer);
-			json_value *J = json_parse(buffer, length);
-			if (J) {
-				result = chirp_job_kill(J, esubject);
-				json_value_free(J);
-				if (result) {
-					errno = result;
-					goto failure;
-				}
-			} else {
-				debug(D_DEBUG, "does not parse as json!");
-				errno = EINVAL;
-				goto failure;
-			}
-		} else if(sscanf(line, "job_status %" PRId64, &length) == 1) {
-			if ((length = getvarstring(l, stalltime, buffer, length, 0)) == -1)
-				goto failure;
-			debug(D_CHIRP, "--> job_status `%.*s'", (int)length, (char *)buffer);
-			json_value *J = json_parse(buffer, length);
-			if (J) {
-				result = chirp_job_status(J, esubject, B);
-				if (result) {
-					errno = result;
-					goto failure;
-				} else {
-					result = buffer_pos(B);
-				}
-				json_value_free(J);
-			} else {
-				debug(D_DEBUG, "does not parse as json!");
-				errno = EINVAL;
-				goto failure;
+				result = buffer_pos(B);
 			}
 		} else if(sscanf(line, "job_wait %" SCNCHIRP_JOBID_T " %" SCNd64, &id, &length) == 2) {
 			result = chirp_job_wait(id, esubject, length, B);
@@ -1644,23 +1615,9 @@ static void chirp_handler(struct link *l, const char *addr, const char *subject)
 			} else {
 				result = buffer_pos(B);
 			}
-		} else if(sscanf(line, "job_reap %" PRId64, &length) == 1) {
-			if ((length = getvarstring(l, stalltime, buffer, length, 0)) == -1)
-				goto failure;
-			debug(D_DEBUG, "--> job_reap `%.*s'", (int)length, (char *)buffer);
-			json_value *J = json_parse(buffer, length);
-			if (J) {
-				result = chirp_job_reap(J, esubject);
-				json_value_free(J);
-				if (result) {
-					errno = result;
-					goto failure;
-				}
-			} else {
-				debug(D_DEBUG, "does not parse as json!");
-				errno = EINVAL;
-				goto failure;
-			}
+		} else if(sscanf(line, "job_reap %" PRICHIRP_JOBID_T, &id) == 1) {
+			debug(D_DEBUG, "--> job_reap %" PRICHIRP_JOBID_T, id);
+			result = chirp_job_reap(id, esubject);
 		} else {
 			errno = ENOSYS;
 			goto failure;
@@ -1755,17 +1712,14 @@ static void chirp_receive(struct link *link, char url[CHIRP_PATH_MAX])
 
 		downgrade(); /* downgrade privileges after authentication */
 
-		/* See above comment concerning authentication. */
-		if (cfs != &chirp_fs_confuga) {
-			/* Enable only globus, hostname, and address authentication for third-party transfers. */
-			auth_clear();
-			if(auth_globus_has_delegated_credential()) {
-				auth_globus_use_delegated_credential(1);
-				auth_globus_register();
-			}
-			auth_hostname_register();
-			auth_address_register();
+		/* Enable only globus, hostname, and address authentication for third-party transfers. */
+		auth_clear();
+		if(auth_globus_has_delegated_credential()) {
+			auth_globus_use_delegated_credential(1);
+			auth_globus_register();
 		}
+		auth_hostname_register();
+		auth_address_register();
 
 		change_process_title("chirp_server [%s:%d] [%s]", addr, port, typesubject);
 
@@ -1887,6 +1841,7 @@ static void show_help(const char *cmd)
 	fprintf(stdout, " %-30s Location of transient data. (default: `.')\n", "-y,--transient=<dir>");
 	fprintf(stdout, " %-30s Select port at random and write it to this file. (default: disabled)\n", "-Z,--port-file=<file>");
 	fprintf(stdout, " %-30s Set max timeout for unix filesystem authentication. (default: 5s)\n", "-z,--unix-timeout=<file>");
+	fprintf(stdout, " %-30s Set max duration for authentication tickets, in seconds. (default is unlimited)\n", "--max-ticket-duration=<time>");
 	fprintf(stdout, "\n");
 	fprintf(stdout, "Where debug flags are: ");
 	debug_flags_print(stdout);
@@ -1901,6 +1856,7 @@ int main(int argc, char *argv[])
 		LONGOPT_JOB_TIME_LIMIT                   = INT_MAX-2,
 		LONGOPT_INHERIT_DEFAULT_ACL              = INT_MAX-3,
 		LONGOPT_PROJECT_NAME                     = INT_MAX-4,
+		LONGOPT_MAX_TICKET_DURATION              = INT_MAX-5,
 	};
 
 	static const struct option long_options[] = {
@@ -1924,6 +1880,7 @@ int main(int argc, char *argv[])
 		{"job-concurrency", required_argument, 0, LONGOPT_JOB_CONCURRENCY},
 		{"job-time-limit", required_argument, 0, LONGOPT_JOB_TIME_LIMIT},
 		{"max-clients", required_argument, 0, 'M'},
+		{"max-ticket-duration", required_argument, 0, LONGOPT_MAX_TICKET_DURATION},
 		{"no-core-dump", no_argument, 0, 'C'},
 		{"owner", required_argument, 0, 'w'},
 		{"parent-check", required_argument, 0, 'e'},
@@ -2106,6 +2063,10 @@ int main(int argc, char *argv[])
 			break;
 		case LONGOPT_PROJECT_NAME:
 			strncpy(chirp_project_name, optarg, sizeof(chirp_project_name)-1);
+			break;
+		case LONGOPT_MAX_TICKET_DURATION:
+			free(ticket_duration_limit);
+			ticket_duration_limit = strdup(optarg);
 			break;
 		case 'h':
 		default:
@@ -2337,4 +2298,4 @@ int main(int argc, char *argv[])
 	}
 }
 
-/* vim: set noexpandtab tabstop=4: */
+/* vim: set noexpandtab tabstop=8: */

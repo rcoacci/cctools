@@ -5,271 +5,117 @@
 # See the file COPYING for details.
 
 
-from poncho import package_analyze as analyze
-from poncho import package_create as create
-import argparse
+from ndcctools.poncho import package_analyze as analyze
+from ndcctools.poncho import package_create as create
+from ndcctools.poncho.wq_network_code import wq_network_code
+from ndcctools.poncho import library_network_code
+
 import json
 import os
+import sys
 import stat
 import ast
+import types
 import tarfile
 import hashlib
 import inspect
 
+import cloudpickle
+
 shebang = "#! /usr/bin/env python3\n\n"
 
-def library_network_code():
-    import json
-    import os
-    import sys
+default_name_func = """def name():
+    return "my_coprocess"
 
-    def remote_execute(func):
-        def remote_wrapper(event):
-            kwargs = event["fn_kwargs"]
-            args = event["fn_args"]
-            try:
-                response = {
-                    "Result": func(*args, **kwargs),
-                    "StatusCode": 200
-                }
-            except Exception as e:
-                response = {
-                    "Result": str(e),
-                    "StatusCode": 500
-                }
-            return response
-        return remote_wrapper
+"""
+init_function = """if __name__ == "__main__":
+    main()
 
-    read, write = os.pipe()
+"""
 
-    def send_configuration(config):
-        config_string = json.dumps(config)
-        config_cmd = f"{len(config_string) + 1}\n{config_string}\n"
-        sys.stdout.write(config_cmd)
-        sys.stdout.flush()
 
-    def main():
-        config = {
-            "name": name(),
-        }
-        send_configuration(config)
-        while True:
-            while True:
-                # wait for message from worker about what function to execute
-                try:
-                    line = input()
-                # if the worker closed the pipe connected to the input of this process, we should just exit
-                except EOFError:
-                    sys.exit(0)
-                function_name, event_size, function_sandbox = line.split(" ", maxsplit=2)
-                if event_size:
-                    # receive the bytes containing the event and turn it into a string
-                    event_str = input()
-                    if len(event_str) != int(event_size):
-                        print(event_str, len(event_str), event_size, file=sys.stderr)
-                        print("Size of event does not match what was sent: exiting", file=sys.stderr)
-                        sys.exit(1)
-                    # turn the event into a python dictionary
-                    event = json.loads(event_str)
-                    # see if the user specified an execution method
-                    exec_method = event.get("remote_task_exec_method", None)
-                    if exec_method == "direct":
-                        library_sandbox = os.getcwd()
-                        try:
-                            os.chdir(function_sandbox)
-                            response = json.dumps(globals()[function_name](event))
-                        except Exception as e:
-                            print(f'Library code: Function call failed due to {e}', file=sys.stderr)
-                            sys.exit(1)
-                        finally:
-                            os.chdir(library_sandbox)
-                    else:
-                        p = os.fork()
-                        if p == 0:
-                            os.chdir(function_sandbox)
-                            response = globals()[function_name](event)
-                            os.write(write, json.dumps(response).encode("utf-8"))
-                            os._exit(0)
-                        elif p < 0:
-                            print(f'Library code: unable to fork to execute {function_name}', file=sys.stderr)
-                            response = {
-                                "Result": "unable to fork",
-                                "StatusCode": 500
-                            }
-                        else:
-                            max_read = 65536
-                            chunk = os.read(read, max_read).decode("utf-8")
-                            all_chunks = [chunk]
-                            while (len(chunk) >= max_read):
-                                chunk = os.read(read, max_read).decode("utf-8")
-                                all_chunks.append(chunk)
-                            response = "".join(all_chunks)
-                            os.waitpid(p, 0)
-                    print(response, flush=True)
-        return 0
+# Generates a list of import statements based on the given argument.
+# @param hoisting_modules  A list of modules imported at the preamble of library, including packages, functions and classes.
+def generate_hoisting_code(hoisting_modules):
+    if not hoisting_modules:
+        return
 
-def wq_network_code():
-    import socket
-    import json
-    import os
-    import sys
-    def remote_execute(func):
-        def remote_wrapper(event):
-            kwargs = event["fn_kwargs"]
-            args = event["fn_args"]
-            try:
-                response = {
-                    "Result": func(*args, **kwargs),
-                    "StatusCode": 200
-                }
-            except Exception as e:
-                response = {
-                    "Result": str(e),
-                    "StatusCode": 500
-                }
-            return response
-        return remote_wrapper
+    if not isinstance(hoisting_modules, list):
+        raise ValueError("Expected 'hoisting_modules' to be a list.")
 
-    read, write = os.pipe()
-    def send_configuration(config):
-        config_string = json.dumps(config)
-        config_cmd = f"{len(config_string) + 1}\n{config_string}\n"
-        sys.stdout.write(config_cmd)
-        sys.stdout.flush()
-    def main():
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            # modify the port argument to be 0 to listen on an arbitrary port
-            s.bind(('localhost', 0))
-        except Exception as e:
-            s.close()
-            print(e, file=sys.stderr)
-            sys.exit(1)
-        # information to print to stdout for worker
-        config = {
-                "name": name(),
-                "port": s.getsockname()[1],
-                }
-        send_configuration(config)
-        while True:
-            s.listen()
-            conn, addr = s.accept()
-            print('Network function: connection from {}'.format(addr), file=sys.stderr)
-            while True:
-                # peek at message to find newline to get the size
-                event_size = None
-                line = conn.recv(100, socket.MSG_PEEK)
-                eol = line.find(b'\n')
-                if eol >= 0:
-                    size = eol+1
-                    # actually read the size of the event
-                    input_spec = conn.recv(size).decode('utf-8').split()
-                    function_name = input_spec[0]
-                    task_id = int(input_spec[1])
-                    event_size = int(input_spec[2])
-                try:
-                    if event_size:
-                        # receive the bytes containing the event and turn it into a string
-                        event_str = conn.recv(event_size).decode("utf-8")
-                        # turn the event into a python dictionary
-                        event = json.loads(event_str)
-                        # see if the user specified an execution method
-                        exec_method = event.get("remote_task_exec_method", None)
-                        os.chdir(f"t.{task_id}")
-                        if exec_method == "direct":
-                            response = json.dumps(globals()[function_name](event)).encode("utf-8")
-                        else:
-                            p = os.fork()
-                            if p == 0:
-                                response =globals()[function_name](event)
-                                os.write(write, json.dumps(response).encode("utf-8"))
-                                os._exit(0)
-                            elif p < 0:
-                                print(f'Network function: unable to fork to execute {function_name}', file=sys.stderr)
-                                response = {
-                                    "Result": "unable to fork",
-                                    "StatusCode": 500
-                                }
-                            else:
-                                max_read = 65536
-                                chunk = os.read(read, max_read).decode("utf-8")
-                                all_chunks = [chunk]
-                                while (len(chunk) >= max_read):
-                                    chunk = os.read(read, max_read).decode("utf-8")
-                                    all_chunks.append(chunk)
-                                response = "".join(all_chunks).encode("utf-8")
-                                os.waitpid(p, 0)
-                        response_size = len(response)
-                        size_msg = "{}\n".format(response_size)
-                        # send the size of response
-                        conn.sendall(size_msg.encode('utf-8'))
-                        # send response
-                        conn.sendall(response)
-                        os.chdir("..")
-                        break
-                except Exception as e:
-                    print("Network function encountered exception ", str(e), file=sys.stderr)
-        return 0
+    hoisting_code_list = []
+    for module in hoisting_modules:
+        if isinstance(module, types.ModuleType):
+            hoisting_code_list.append(f"import {module.__name__}")
+        elif inspect.isfunction(module):
+            source_code = inspect.getsource(module)
+            hoisting_code_list.append(source_code)
+        elif inspect.isclass(module):
+            source_code = inspect.getsource(module)
+            hoisting_code_list.append(source_code)
 
-default_name_func = \
-'''def name():
-	return "my_coprocess"
+    return hoisting_code_list
 
-'''
-init_function = \
-'''if __name__ == "__main__":
-	main()
 
-'''
+# Create the library driver code that will be run as a normal task
+# on workers and execute function invocations upon workers' instructions.
+# @param path            Path to the temporary Python script containing functions.
+# @param funcs           A list of relevant function names.
+# @param dest            Path to the final library script.
+# @param version         Whether this is for workqueue or taskvine serverless code.
+# @param hoisting_modules  A list of modules imported at the preamble of library, including packages, functions and classes.
+def create_library_code(path, funcs, dest, version, hoisting_modules=None):
+    # create output file
+    with open(dest, "w") as output_file:
+        # write shebang to file
+        output_file.write(shebang)
+        # write imports to file
+        hoisting_code_list = generate_hoisting_code(hoisting_modules)
+        if hoisting_code_list:
+            for hoisting_code in hoisting_code_list:
+                output_file.write(f"{hoisting_code}\n")
 
-def create_library_code(path, funcs, dest, version):
-	import_modules = []
-	function_source_code = []
-	name_source_code = ""
-	absolute_path = os.path.abspath(path)
-	# open the source file, parse the code into an ast, and then unparse the ast import statements and functions back into python code
-	with open(absolute_path, 'r') as source:
-		code = ast.parse(source.read(), filename=absolute_path)
-		for stmt in ast.walk(code):
-			if isinstance(stmt, ast.Import) or isinstance(stmt, ast.ImportFrom):
-				import_modules.append(ast.unparse(stmt))
-			if isinstance(stmt, ast.FunctionDef):
-				if stmt.name == "name":
-					name_source_code = ast.unparse(stmt)
-				elif stmt.name in funcs:
-					function_source_code.append(ast.unparse(stmt))
-					funcs.remove(stmt.name)
-	if name_source_code == "":
-		print("No name function found, defaulting to my_coprocess")
-		name_source_code = default_name_func
-	for func in funcs:
-		print(f"No function found named {func}, skipping")
-	# create output file
-	output_file = open(dest, "w")
-	# write shebang to file
-	output_file.write(shebang)
-	# write imports to file
-	for import_module in import_modules:
-		output_file.write(f"{import_module}\n")
-	# write network code into it
-	if version == "work_queue":
-		raw_source_fnc = wq_network_code
-	elif version == "taskvine":
-		raw_source_fnc = library_network_code
-	raw_source_code = inspect.getsource(raw_source_fnc)
-	network_code = "\n".join([line[4:] for line in raw_source_code.split("\n")[1:]])
-	output_file.write(network_code)
-	# write name function code into it
-	output_file.write(f"{name_source_code}\n")
-	# iterate over every function the user requested and attempt to put it into the library code
-	for function_code in function_source_code:
-		output_file.write("@remote_execute\n")
-		output_file.write(function_code)
-		output_file.write("\n")
-	output_file.write(init_function)
-	output_file.close()
-	st = os.stat(dest)
-	os.chmod(dest, st.st_mode | stat.S_IEXEC)
+        function_source_code = []
+        name_source_code = ""
+        absolute_path = os.path.abspath(path)
+        # open the source file, parse the code into an ast, and then unparse functions back into python code
+        with open(absolute_path, "r") as source:
+            code = ast.parse(source.read(), filename=absolute_path)
+            for stmt in ast.walk(code):
+                if isinstance(stmt, ast.FunctionDef):
+                    if stmt.name == "name":
+                        name_source_code = ast.unparse(stmt)
+                    elif stmt.name in funcs:
+                        function_source_code.append(ast.unparse(stmt))
+                        funcs.remove(stmt.name)
+        if name_source_code == "":
+            print("No name function found, defaulting to my_coprocess")
+            name_source_code = default_name_func
+        for func in funcs:
+            print(f"No function found named {func}, skipping")
+
+        # write network code into it
+        if version == "work_queue":
+            raw_source_fnc = wq_network_code
+        elif version == "taskvine":
+            raw_source_fnc = library_network_code
+        raw_source_code = inspect.getsource(raw_source_fnc)
+        network_code = "\n".join([line[4:] for line in raw_source_code.split("\n")[1:]])
+        output_file.write(network_code)
+
+        # write name function code into it
+        output_file.write(f"{name_source_code}\n")
+        # iterate over every function the user requested and attempt to put it into the library code
+        for function_code in function_source_code:
+            output_file.write("@remote_execute\n")
+            output_file.write(function_code)
+            output_file.write("\n")
+
+        output_file.write(init_function)
+
+    st = os.stat(dest)
+    os.chmod(dest, st.st_mode | stat.S_IEXEC)
+
 
 def sort_spec(spec):
     sorted_spec = json.load(spec)
@@ -285,10 +131,13 @@ def sort_spec(spec):
             dep[key] = dep[key].sort()
     return json.dumps(sorted(conda_deps) + nested_deps, sort_keys=True).encode("utf-8")
 
+
 def search_env_for_spec(envpath):
     env_spec = None
     if os.path.exists(envpath) and envpath.endswith(".tar.gz"):
-        print("Cached environment found, checking if it is compatiable with new library code")
+        print(
+            "Cached environment found, checking if it is compatiable with new library code"
+        )
         with tarfile.open(envpath) as env_tar:
             for member in env_tar:
                 if member.name == "conda_spec.yml":
@@ -296,10 +145,13 @@ def search_env_for_spec(envpath):
                         env_spec = hashlib.md5(sort_spec(f)).digest()
                     break
             if env_spec is None:
-                print("Error, could not find conda_spec.yml in cached environment, creating new environment")
+                print(
+                    "Error, could not find conda_spec.yml in cached environment, creating new environment"
+                )
     else:
         print("No environment found at output path, creating new environment")
     return env_spec
+
 
 def pack_library_code(path, envpath):
     prev_env_spec = search_env_for_spec(envpath)
@@ -316,20 +168,193 @@ def pack_library_code(path, envpath):
         print("Cached package is out of date, rebuilding")
         create.pack_env("/tmp/tmp.json", envpath)
 
-def generate_functions_hash(functions):
-    # combine function names and function bodies to create a unique hash of the functions
-    source_code = "".join([inspect.getsource(fnc) for fnc in functions]) + "".join([fnc.__name__ for fnc in functions])
-    return hashlib.md5(source_code.encode("utf-8")).hexdigest()
 
-def serverize_library_from_code(path, functions, name):
+# Generate a hash value from all information about a library
+# @param library_name   The name of the library
+# @param function_list  A list of functions in the library
+# @param poncho_env     The name of an already prepared poncho environment
+# @param init_command   A string describing a shell command to execute before the library task is run
+# @param add_env        Whether to automatically create and/or add environment to the library
+# @param exec_mode      The execution mode of functions in this library.
+# @param hoisting_modules  A list of modules imported at the preamble of library, including packages, functions and classes.
+# @param library_context_info   A list containing [library_context_func, library_context_args, library_context_kwargs]. Used to create the library context on remote nodes.
+# @return               A hash value.
+def generate_library_hash(library_name,
+                          function_list,
+                          poncho_env,
+                          init_command,
+                          add_env,
+                          exec_mode,
+                          hoisting_modules,
+                          library_context_info):
+    library_info = [library_name]
+    function_list = list(function_list)
+    function_names = set()
+
+    if library_context_info:
+        function_list += [library_context_info[0]]
+
+    for function in function_list:
+        if function.__name__ is None:
+            raise ValueError('A function must have a name.')
+        if function.__name__ in function_names:
+            raise ValueError('A library cannot have two functions with the same name.')
+        else:
+            function_names.add(function.__name__)
+        
+        try:
+            library_info.append(inspect.getsource(function))
+        except OSError:
+            # process the function's code object
+            func_co = function.__code__
+            library_info.append(str(func_co.co_name))
+            library_info.append(str(func_co.co_argcount))
+            library_info.append(str(func_co.co_posonlyargcount))
+            library_info.append(str(func_co.co_kwonlyargcount))
+            library_info.append(str(func_co.co_nlocals))
+            library_info.append(str(func_co.co_varnames))
+            library_info.append(str(func_co.co_cellvars))
+            library_info.append(str(func_co.co_freevars))
+            library_info.append(str(func_co.co_code))
+            library_info.append(str(func_co.co_consts))
+            library_info.append(str(func_co.co_names))
+            library_info.append(str(func_co.co_stacksize))
+
+    library_info.append(str(poncho_env))
+    library_info.append(str(init_command))
+    library_info.append(str(add_env))
+    library_info.append(str(exec_mode))
+    library_info.append(str(hoisting_modules))
+
+    if library_context_info:
+        if isinstance(library_context_info[1], list):
+            for arg in library_context_info[1]:
+                library_info.append(str(arg))
+        if isinstance(library_context_info[2], dict):
+            for kwarg in library_context_info[2]:
+                library_info.append(str(kwarg))
+                library_info.append(str(library_context_info[2][kwarg]))
+    
+    library_info = ''.join(library_info)    # linear time complexity
+    msg = hashlib.sha1()
+    msg.update(library_info.encode('utf-8'))
+    return msg.hexdigest()
+
+
+# Combine function names and function bodies to create a unique hash of the functions.
+# Note that these functions must have source code, so dynamic functions generated from
+# Python's exec or Jupyter Notebooks won't work here.
+# @param functions  A list of functions to generate the hash value from.
+# @return           a string of hex characters resulted from hashing the contents and names of functions.
+def generate_functions_hash(functions: list, hoisting_modules=None) -> str:
+    source_code = []
+    if hoisting_modules:
+        source_code.extend(["import " + module.__name__ + "\n" for module in hoisting_modules])
+
+    for fnc in functions:
+        try:
+            source_code.append(inspect.getsource(fnc))
+        except OSError as e:
+            print(
+                f"Can't retrieve source code of function {fnc.__name__}.",
+                file=sys.stderr,
+            )
+            raise
+    
+    return hashlib.md5(" ".join(source_code).encode("utf-8")).hexdigest()
+
+
+def generate_taskvine_library_code(library_path, hoisting_modules=None):
+    # create output file
+    with open(library_path, "w") as output_file:
+        # write shebang to file
+        output_file.write(shebang)
+        # write imports to file
+        hoisting_code_list = generate_hoisting_code(hoisting_modules)
+        if hoisting_code_list:
+            for hoisting_code in hoisting_code_list:
+                output_file.write(f"{hoisting_code}\n")
+
+        raw_source_code = inspect.getsource(library_network_code)
+        output_file.write(raw_source_code)
+
+    st = os.stat(library_path)
+    os.chmod(library_path, st.st_mode | stat.S_IEXEC)
+
+
+# Create a library file and a poncho environment tarball from a list of functions as needed.
+# @param    library_cache_path      path to directory to create the library python file and the environment tarball.
+# @param    library_code_path       path to the to-be-created library code.
+# @param    library_env_path        path to the to-be-created poncho environment tarball.
+# @param    library_info_path       path to the to-be-created library information in serialized format.
+# @param    functions               list of functions to include in the library
+# @param    library_name            name of the library
+# @param    need_pack               whether to create a poncho environment tarball
+# @param    exec_mode               execution mode of functions in this library
+# @param    hoisting_modules        a list of modules to be imported at the preamble of library
+# @param    library_context_info    a list containing a library's context to be created remotely
+# @return   name of the file containing serialized information about the library
+def generate_library(library_cache_path,
+                     library_code_path,
+                     library_env_path,
+                     library_info_path,
+                     functions,
+                     library_name,
+                     need_pack=True,
+                     exec_mode='fork',
+                     hoisting_modules=None,
+                     library_context_info=None
+):
+    # create library_info.clpk
+    library_info = {}
+    library_info['function_list'] = {}
+    for func in functions:
+        library_info['function_list'][func.__name__] = cloudpickle.dumps(func)
+    library_info['library_name'] = library_name
+    library_info['exec_mode'] = exec_mode
+    library_info['context_info'] = cloudpickle.dumps(library_context_info)
+    with open(library_info_path, 'wb') as f:
+        cloudpickle.dump(library_info, f) 
+
+    # create library_code.py
+    generate_taskvine_library_code(library_code_path, hoisting_modules=hoisting_modules)
+
+    # pack environment
+    if need_pack:
+        pack_library_code(library_code_path, library_env_path)
+
+
+# Create a library file and a poncho environment tarball from a list of functions as needed.
+# @param    path                    path to directory to create the library python file and the environment tarball.
+# @param    functions               list of functions to include in the library
+# @param    need_pack               whether to create a poncho environment tarball
+# @param    hoisting_modules        a list of modules to be imported at the preamble of library
+# @return   name of the file containing serialized information about functions
+def serverize_library_from_code(
+    path, functions, name, need_pack=True, hoisting_modules=None
+):
     tmp_library_path = f"{path}/tmp_library.py"
-    # write out functions into a temporary python file
+
+    # Write out functions into a temporary python file.
+    # Also write a helper function to identify the name of the library.
     with open(tmp_library_path, "w") as temp_source_file:
         temp_source_file.write("".join([inspect.getsource(fnc) for fnc in functions]))
         temp_source_file.write(f"def name():\n\treturn '{name}'")
-    print("Creating Library code from input functions")
+
     # create the final library code from that temporary file
-    create_library_code(tmp_library_path, [fnc.__name__ for fnc in functions], path + "/library_code.py", "taskvine")
-    print("Running poncho_package_create to pack Library environment into a tarball")
-    # and pack it into an environment
-    pack_library_code(path + "/library_code.py", path + "/library_env.tar.gz")
+    create_library_code(
+        tmp_library_path,
+        [fnc.__name__ for fnc in functions],
+        path + "/library_code.py",
+        "taskvine",
+        hoisting_modules=hoisting_modules,
+    )
+    # remove the temp library file
+    os.remove(tmp_library_path)
+
+    # and pack it into an environment, if needed
+    if need_pack:
+        pack_library_code(path + "/library_code.py", path + "/library_env.tar.gz")
+
+
+# vim: set sts=4 sw=4 ts=4 expandtab ft=python:

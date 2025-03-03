@@ -41,7 +41,8 @@ import shutil
 import atexit
 import time
 import math
-import weakref
+
+__version__ = cctools_version_string()
 
 
 def set_debug_flag(*flags):
@@ -80,6 +81,7 @@ def cleanup_staging_directory():
         sys.stderr.write("could not delete {}: {}\n".format(staging_directory, e))
 
 
+# BUG: the atexit won't be called if python exits with an exception.
 atexit.register(cleanup_staging_directory)
 
 
@@ -104,17 +106,18 @@ class Task(object):
         if not self._task:
             raise Exception("Unable to create internal Task structure")
 
-        self._finalizer = weakref.finalize(self, self._free)
-
-    def _free(self):
+    def __del__(self):
+        try:
         if not self._task:
             return
-        if self._manager and self._manager._finalizer.alive and self.id in self._manager._task_table:
+            if self._manager and self.id in self._manager._task_table:
             # interpreter is shutting down. Don't delete task here so that manager
             # does not get memory errors
             return
         work_queue_task_delete(self._task)
         self._task = None
+        except TypeError:
+            pass
 
     @staticmethod
     def _determine_file_flags(flags, cache, failure_only):
@@ -983,12 +986,17 @@ class PythonTask(Task):
         super(PythonTask, self).__init__(self._command)
         self._specify_IO_files()
 
-        self._finalizer = weakref.finalize(self, self._free)
-
-    def _free(self):
-        if self._tmpdir and os.path.exists(self._tmpdir):
-            shutil.rmtree(self._tmpdir)
-        super()._free()
+    # remove any temp files generated
+    # if __del__ is never called, or called too late (e.g. on interpreter shutdown),
+    # then temp files will be deleted in the atexit of the staging directory
+    def __del__(self):
+        try:
+            if self._tmpdir:
+                shutil.rmtree(self._tmpdir, ignore_errors=True)
+            super().__del__()
+        except TypeError:
+            # in case the interpreter is shuting down. staging files will be deleted by manager atexit function.
+            pass
 
     ##
     # returns the result of a python task as a python variable
@@ -1167,24 +1175,28 @@ class WorkQueue(object):
                 work_queue_specify_name(self._work_queue, name)
         except Exception as e:
             raise Exception("Unable to create internal Work Queue structure: {}".format(e))
-        finally:
-            self._finalizer = weakref.finalize(self, self._free)
+
         self._update_status_display()
 
     def _free(self):
+        try:
         if self._work_queue:
             if self._shutdown:
                 self.shutdown_workers(0)
             self._update_status_display(force=True)
             work_queue_delete(self._work_queue)
             self._work_queue = None
+        except TypeError:
+            pass
+
+    def __del__(self):
+        self._free()
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self._update_status_display(force=True)
-        self._finalizer()
+        self._free()
 
     def _setup_ssl(self, ssl):
         if not ssl:
@@ -1710,6 +1722,21 @@ class WorkQueue(object):
         for k in rmd:
             setattr(rm, k, rmd[k])
         return work_queue_specify_category_first_allocation_guess(self._work_queue, category, rm)
+
+    ##
+    # Specifies the maximum resources allowed for the given category.
+    #
+    # @param self      Reference to the current work queue object.
+    # @param category  Name of the category.
+    # @param max_concurrent Number of maximum concurrent tasks. Less then 0 means unlimited (this is the default).
+    # For example:
+    # @code
+    # >>> # Do not run more than 5 tasks of "my_category" concurrently:
+    # >>> q.specify_category_max_concurrent("my_category", 5)
+    # @endcode
+    def specify_category_max_concurrent(self, category, max_concurrent):
+        return work_queue_specify_category_max_concurrent(self._work_queue, category, max_concurrent)
+
 
     ##
     # Initialize first value of categories
@@ -2373,7 +2400,6 @@ class Factory(object):
         self._factory_proc = None
         self._log_file = log_file
         self._error_file = None
-        self._scratch_safe_to_delete = False
 
         self._opts = {}
 
@@ -2383,13 +2409,6 @@ class Factory(object):
         self._opts["worker-binary"] = self._find_exe(worker_binary, "work_queue_worker")
         self._factory_binary = self._find_exe(factory_binary, "work_queue_factory")
         self._opts["scratch-dir"] = None
-
-        def free():
-            if self._factory_proc is not None:
-                self.stop()
-            if self._scratch_safe_to_delete and self.scratch_dir and os.path.exists(self.scratch_dir):
-                shutil.rmtree(self.scratch_dir)
-        self._finalizer = weakref.finalize(self, free)
 
     def _set_manager(self, batch_type, manager, manager_host_port, manager_name):
         if not (manager or manager_host_port or manager_name):
@@ -2518,13 +2537,11 @@ class Factory(object):
             self.scratch_dir = candidate
 
         # specialize scratch_dir for this run
-        self.scratch_dir = tempfile.mkdtemp(prefix="wq-factory-", dir=self.scratch_dir)
-        self._scratch_safe_to_delete = True
+        self._scratch_dir_run = tempfile.mkdtemp(prefix="vine-factory-", dir=self.scratch_dir)
+        atexit.register(lambda: shutil.rmtree(self._scratch_dir_run, ignore_errors=True))
 
-        atexit.register(lambda: os.path.exists(self.scratch_dir) and shutil.rmtree(self.scratch_dir))
-
-        self._error_file = os.path.join(self.scratch_dir, "error.log")
-        self._config_file = os.path.join(self.scratch_dir, "config.json")
+        self._error_file = os.path.join(self._scratch_dir_run, "error.log")
+        self._config_file = os.path.join(self._scratch_dir_run, "config.json")
 
         self._write_config()
         logfd = open(self._log_file, "a")
@@ -2561,6 +2578,12 @@ class Factory(object):
     def __exit__(self, exc_type, exc_value, traceback):
         self.stop()
 
+    def __del__(self):
+        try:
+            self.stop()
+        except (TypeError, RuntimeError):
+            pass
+
     def _write_config(self):
         if self._config_file is None:
             return
@@ -2574,3 +2597,4 @@ class Factory(object):
 
     specify_package = specify_environment
 
+# vim: set sts=4 sw=4 ts=4 expandtab ft=python:

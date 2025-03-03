@@ -29,9 +29,9 @@ status page](http://ccl.cse.nd.edu/software/workqueue/status).
 
 There are a variety of ways to install Work Queue, depending on your local environment.
 In most cases, installing via `conda` is the easiest method.
-Please see our [full installation instructions](../install) for other options.
+Please see our [full installation instructions](../install/index.md) for other options.
 
-First, [Install Miniconda](https://docs.conda.io/en/latest/miniconda.html) if you haven't done so before.
+First, [Install Miniforge](https://github.com/conda-forge/miniforge#install) if you don't already have `conda` installed.
 Then, open a terminal and install `ndcctools` like this:
 
 ```
@@ -103,7 +103,7 @@ a **resource monitor** to track and report what each task uses.
 
 To run a large application at scale, you must start a number of Workers in parallel.
 If you are using a university cluster or HPC system, then you will likely be submitting
-the workers to a batch system such as HTCondor, SLURM, or SGE.  If you are using a commercial
+the workers to a batch system such as HTCondor, SLURM, or UGE.  If you are using a commercial
 cloud, then you can run your workers inside of virtual machines.  We provide a number of
 scripts to facilitate starting workers this way, or you can arrange things yourself to
 simply run the `work_queue_worker` executable.
@@ -116,7 +116,7 @@ A manager program can be written in Python, Perl, or C.
 In each language, the underlying principles are the same, but there are some syntactic differences shown below.
 The full API documentation for each language is here:
 
-- [Work Queue Python API](../api/html/namespacework__queue.html)
+- [Work Queue Python API](../api/html/namespacendcctools_1_1work__queue.html)
 - [Work Queue Perl API](http://ccl.cse.nd.edu/software/manuals/api/html/namespaceWorkQueuePerl.html)
 - [Work Queue C API](../api/html/work__queue_8h.html)
 
@@ -514,10 +514,11 @@ $ export PERL5LIB=${HOME}/cctools/lib/perl5/site_perl:${PERL5LIB}
 
 #### C Language Setup
 
-If you are writing a Work Queue application in C, you should compile it into an executable like this:
+If you are writing a Work Queue application in C, you should compile it into an executable with a command like this.  Note that this example assumes that CCTools has
+been installed using the `conda` method.
 
 ```sh
-$ gcc work_queue_example.c -o work_queue_example -I${HOME}/cctools/include/cctools -L${HOME}/cctools/lib -lwork_queue -ldttools -lcrypto -lssl -lm -lz
+$ gcc work_queue_example.c -o work_queue_example -I${CONDA_PREFIX}/include/cctools -L${CONDA_PREFIX}/cctools/lib -lwork_queue -ldttools -lcrypto -lssl -lm -lz
 ```
    
 ### Running a Manager Program
@@ -586,7 +587,7 @@ Similar scripts are available for other common batch systems:
 
 ```sh
 $ slurm_submit_workers MACHINENAME 9123 10
-$ sge_submit_workers MACHINENAME 9123 10
+$ uge_submit_workers MACHINENAME 9123 10
 $ pbs_submit_workers MACHINENAME 9123 10
 $ torque_submit_workers MACHINENAME 9123 10
 ```
@@ -605,7 +606,7 @@ if there are multiple managers. To help with this, a **project name** can be use
 Work Queue workers can then be started for their managers by providing
 the project name instead of a host an port number.
 
-The project name feature uses the [Catalog Server](../catalog) to maintain and track the
+The project name feature uses the [Catalog Server](../catalog/index.md) to maintain and track the
 project names of managers and their respective locations. It works as follows:
 the manager advertises its project name along with its hostname and port to the
 catalog server. Work Queue workers that are provided with the manager's project
@@ -648,10 +649,10 @@ Logging submit event(s)..........
 10 job(s) submitted to cluster 298.
 ```
 
-Or similarly on SGE using `sge_submit_workers` as:
+Or similarly on UGE using `uge_submit_workers` as:
 
 ```sh
-$ sge_submit_workers -M myproject 10
+$ uge_submit_workers -M myproject 10
 Your job 153097 ("worker.sh") has been submitted
 Your job 153098 ("worker.sh") has been submitted
 Your job 153099 ("worker.sh") has been submitted
@@ -661,7 +662,7 @@ Your job 153099 ("worker.sh") has been submitted
 ### Work Queue Status Display
 
 An additional benefit of using a project name is that you can
-now use the [work_queue_status](../man_pages/work_queue_status) command
+now use the [work_queue_status](../man_pages/work_queue_status.md) command
 to display the progress of your application.  This shows the name,
 location, and statistics of each application that reports itself to the
 catalog server.  (Note that this information is updated about once
@@ -713,7 +714,7 @@ For further options, please refer to the work queue factory [manual](../man_page
 
 By default, the factory submits as many tasks that are waiting and running up
 to a specified maximum. To run more than one task in a worker, please refer
-to the following section on describing [task resources](#task-resources) and [worker resources](#work-queue-factory-and-resources).
+to the following section on describing [task resources](#task-resources) and [worker resources](#worker-resources).
 
 
 #### Using the factory with python
@@ -859,7 +860,7 @@ its number of cores. (This will likely change in the future.)
 When you would like to run several tasks in a worker, but you are not sure
 about the resources each task needs, Work Queue can automatically find values
 of resources that maximize throughput, or minimize waste. This is discussed in
-the section [below](#grouping-tasks-with-similar-resources-needs).
+the section [below](#grouping-tasks-with-similar-resource-needs).
 
 ### Worker Resources
 
@@ -899,33 +900,33 @@ batch submission scripts such as `condor_submit_workers` or
 `slurm_submit_workers`, and the script will correctly ask the batch system for
 a node of the desired size.
 
-The only caveat is when using `sge_submit_workers`, as there are many
+The only caveat is when using `uge_submit_workers`, as there are many
 differences across systems that the script cannot manage. For `
-sge_submit_workers ` you have to specify **both** the resources used by the
+uge_submit_workers ` you have to specify **both** the resources used by the
 worker (i.e., with `--cores`, etc.) and the appropiate computing node with the `
 -p ` option.
 
-For example, say that your local SGE installation requires you to specify the
+For example, say that your local UGE installation requires you to specify the
 number of cores with the switch ` -pe smp ` , and you want workers with 4
 cores:
 
 ```sh
-$ sge_submit_workers --cores 4 -p "-pe smp 4" MACHINENAME 9123
+$ uge_submit_workers --cores 4 -p "-pe smp 4" MACHINENAME 9123
 ```
 
 If you find that there are options that are needed everytime, you can compile
-CCTools using the ` --sge-parameter `. For example, at Notre Dame we
+CCTools using the ` --uge-parameter `. For example, at Notre Dame we
 automatically set the number of cores as follows:
 
 ```sh
-$ ./configure  --sge-parameter '-pe smp $cores'
+$ ./configure  --uge-parameter '-pe smp $cores'
 ```
 
 
 So that we can simply call:
 
 ```sh
-$ sge_submit_workers --cores 4 MACHINENAME 9123
+$ uge_submit_workers --cores 4 MACHINENAME 9123
 ```
 
 The variables `$cores `, `$memory `, and `$disk `, have the values of the
@@ -2185,6 +2186,8 @@ change.
 | proportional-resources | If set to 0, do not assign resources proportionally to tasks. The default is to use proportions. (See [task resources.](#task-resources) | 1 |
 | proportional-whole-tasks | Round up resource proportions such that only an integer number of tasks could be fit in the worker. The default is to use proportions. (See [task resources.](#task-resources) | 1 |
 | hungry-minimum          | Smallest number of waiting tasks in the queue before declaring it hungry | 10 |
+| hungry-minimum-factor   | Queue is hungry if number of waiting tasks is less than hungry-minumum-factor x (number of workers) | 2 |
+| ramp-down-heuristic     | If set to 1 and there are more workers than tasks waiting, then tasks are allocated all the free resources of a worker large enough to run them. If monitoring watchdog is not enabled, then this heuristic has no effect. | 0 |
 | resource-submit-multiplier | Assume that workers have `resource x resources-submit-multiplier` available.<br> This overcommits resources at the worker, causing tasks to be sent to workers that cannot be immediately executed.<br>The extra tasks wait at the worker until resources become available. | 1 |
 | wait-for-workers        | Do not schedule any tasks until `wait-for-workers` are connected. | 0 |
 | wait-retrieve-many      | Rather than immediately returning when a task is done, `q.wait(timeout)` retrieves and dispatches as many tasks<br> as `timeout` allows. Warning: This may exceed the capacity of the manager to receive results. | 0 |
@@ -2208,7 +2211,7 @@ change.
 
 ## Further Information
 
-For more information, please see [Getting Help](../help) or visit the [Cooperative Computing Lab](http://ccl.cse.nd.edu) website.
+For more information, please see [Getting Help](../help.md) or visit the [Cooperative Computing Lab](http://ccl.cse.nd.edu) website.
 
 ## Copyright
 

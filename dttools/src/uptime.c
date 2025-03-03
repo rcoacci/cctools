@@ -7,7 +7,7 @@ See the file COPYING for details.
 #include "uptime.h"
 #include "debug.h"
 
-#if defined(CCTOOLS_OPSYS_DARWIN)
+#if defined(CCTOOLS_OPSYS_DARWIN) || defined(CCTOOLS_OPSYS_FREEBSD)
 #include <sys/sysctl.h>
 #include <time.h>
 #elif defined(CCTOOLS_OPSYS_LINUX)
@@ -18,11 +18,11 @@ int uptime_get()
 {
 	int uptime;
 
-#if defined(CCTOOLS_OPSYS_DARWIN)
+#if defined(CCTOOLS_OPSYS_DARWIN) || defined(CCTOOLS_OPSYS_FREEBSD)
 	struct timeval boottime;
 	size_t len = sizeof(boottime);
-	int mib[2] = { CTL_KERN, KERN_BOOTTIME };
-	if(sysctl(mib, 2, &boottime, &len, NULL, 0) < 0) {
+	int mib[2] = {CTL_KERN, KERN_BOOTTIME};
+	if (sysctl(mib, 2, &boottime, &len, NULL, 0) < 0) {
 		uptime = -1;
 	}
 	time_t bsec = boottime.tv_sec;
@@ -40,7 +40,7 @@ int uptime_get()
 	   cases and then only as a debugging tool.
 	 */
 	static int did_warning = 0;
-	if(!did_warning) {
+	if (!did_warning) {
 		debug(D_NOTICE, "uptime not implemented (yet) on this operating system");
 		did_warning = 1;
 	}
@@ -50,4 +50,4 @@ int uptime_get()
 	return uptime;
 }
 
-/* vim: set noexpandtab tabstop=4: */
+/* vim: set noexpandtab tabstop=8: */

@@ -1,12 +1,14 @@
 /*
-Copyright (C) 2022 The University of Notre Dame
+Copyright (C) 2024 The University of Notre Dame
 This software is distributed under the GNU General Public License.
 See the file COPYING for details.
 */
 
 #include "work_queue_catalog.h"
+#include "work_queue_protocol.h"
+
 #include "cctools.h"
-#include "batch_job.h"
+#include "batch_queue.h"
 #include "hash_table.h"
 #include "copy_stream.h"
 #include "debug.h"
@@ -27,6 +29,7 @@ See the file COPYING for details.
 #include "path.h"
 #include "buffer.h"
 #include "rmsummary.h"
+#include "username.h"
 
 #include "jx.h"
 #include "jx_parse.h"
@@ -121,11 +124,18 @@ struct batch_queue *queue = 0;
 // announces it is using SSL, then SSL is used regardless of manual_ssl_option.
 int manual_ssl_option = 0;
 
-//Environment variables to pass along in batch_job_submit
+//Environment variables to pass along in batch_queue_submit
 struct jx *batch_env = NULL;
+
+//Features to pass along as worker arguments
+struct hash_table *features_table = NULL;
 
 //0 means the container image does not container work_queue_worker binary
 int k8s_worker_image = 0;
+
+// Disable the check for invalid use of AFS with HTCondor.
+static int disable_afs_check = 0;
+
 /*
 In a signal handler, only a limited number of functions are safe to
 invoke, so we construct a string and emit it with a low-level write.
@@ -247,7 +257,7 @@ struct list* do_direct_query( const char *manager_host, int manager_port )
 	}
 
 	if(manual_ssl_option) {
-		if(link_ssl_wrap_connect(l) < 1) {
+		if(link_ssl_wrap_connect(l, manager_host) < 1) {
 			fprintf(stderr,"work_queue_factory: could not setup ssl connection.\n");
 			link_close(l);
 			return 0;
@@ -323,6 +333,13 @@ static int count_workers_needed( struct list *managers_list, int only_not_runnin
 		const int tr =       jx_lookup_integer(j,"tasks_on_workers");
 		const int tw =       jx_lookup_integer(j,"tasks_waiting");
 		const int tl =       jx_lookup_integer(j,"tasks_left");
+		const int protocol = jx_lookup_integer(j,"protocol");
+
+		if(protocol!=WORK_QUEUE_PROTOCOL_VERSION) {
+			printf("WARNING: skipping manager %s (%s:%d) with protocol version %d\n",project, host, port, protocol);
+			printf("that is not compatible with this factory protocol version %d\n",WORK_QUEUE_PROTOCOL_VERSION);
+			continue;
+		}
 
 		int capacity = manager_workers_capacity(j);
 
@@ -390,6 +407,27 @@ static void set_worker_resources_options( struct batch_queue *queue )
 	buffer_free(&b);
 }
 
+/*
+Given a hashtable containing the desired features,
+convert it into a string like "--feature x --feature y"
+to pass to the worker.  The returned string must be freed.
+*/
+
+static char * make_features_string( struct hash_table *features_table )
+{
+	char *str = strdup("");
+
+	char *key;
+	void *value;
+	HASH_TABLE_ITERATE(features_table,key,value) {
+		char * newstr = string_format("%s --feature \"%s\"",str,key);
+		free(str);
+		str = newstr;
+	}
+
+	return str;
+}
+
 static int submit_worker( struct batch_queue *queue )
 {
 	char *cmd;
@@ -401,9 +439,11 @@ static int submit_worker( struct batch_queue *queue )
 		worker = string_format("./%s", worker_command);
 	}
 
+	char *features_string = make_features_string(features_table);
+	
 	if(using_catalog) {
 		cmd = string_format(
-		"%s -M %s -t %d -C '%s' -d all -o worker.log %s %s %s %s %s",
+		"%s -M %s -t %d -C '%s' -d all -o worker.log %s %s %s %s %s %s",
 		worker,
 		submission_regex,
 		worker_timeout,
@@ -412,12 +452,13 @@ static int submit_worker( struct batch_queue *queue )
 		password_file ? "-P pwfile" : "",
 		resource_args ? resource_args : "",
 		manual_ssl_option ? "--ssl" : "",
+		features_string,
 		extra_worker_args ? extra_worker_args : ""
 		);
 	}
 	else {
 		cmd = string_format(
-		"%s %s %d -t %d -C '%s' -d all -o worker.log %s %s %s %s",
+		"%s %s %d -t %d -C '%s' -d all -o worker.log %s %s %s %s %s",
 		worker,
 		manager_host,
 		manager_port,
@@ -426,10 +467,13 @@ static int submit_worker( struct batch_queue *queue )
 		password_file ? "-P pwfile" : "",
 		resource_args ? resource_args : "",
 		manual_ssl_option ? "--ssl" : "",
+		features_string,
 		extra_worker_args ? extra_worker_args : ""
 		);
 	}
 
+	free(features_string);
+	
 	if(wrapper_command) {
 		// Note that we don't use string_wrap_command here,
 		// because the clever quoting interferes with the $$([Target.Memory]) substitution above.
@@ -438,42 +482,44 @@ static int submit_worker( struct batch_queue *queue )
 		cmd = newcmd;
 	}
 
-	char *files = NULL;
-	if(!runos_os && !k8s_worker_image) {
-		files = xxstrdup(worker_command);
-	} else {
-		// if runos, then worker comes from vc3_cmd. if k8s, then from the
-		// container image.
-		files = xxstrdup("");
-	}
-
-	if(password_file) {
-		char *newfiles = string_format("%s,pwfile",files);
-		free(files);
-		files = newfiles;
-	}
-
-	const char *item = NULL;
-	list_first_item(wrapper_inputs);
-	while((item = list_next_item(wrapper_inputs))) {
-		char *newfiles = string_format("%s,%s",files,path_basename(item));
-		free(files);
-		files = newfiles;
-	}
-
 	if(runos_os){
 		char* temp = string_format("%s %s %s",CCTOOLS_RUNOS_PATH,runos_os,cmd);
 		free(cmd);
 		cmd = temp;
 	}
 
+	struct batch_job *task = batch_job_create(queue);
+
+	batch_job_set_command(task,cmd);
+	
+	if(resources) {
+		batch_job_set_resources(task, resources);
+	}
+	
+	if(!runos_os && !k8s_worker_image) {
+		batch_job_add_input_file(task,worker_command,0);
+	} else {
+		// if runos, then worker comes from vc3_cmd. if k8s, then from the container image.
+	}
+
+	if(password_file) {
+		batch_job_add_input_file(task,"pwfile",0);
+	}
+
+	const char *item = NULL;
+	LIST_ITERATE(wrapper_inputs,item) {
+		batch_job_add_input_file(task,path_basename(item),0);
+	}
+
+	batch_job_add_output_file(task,"output.log",0);
+	
 	debug(D_WQ,"submitting worker: %s",cmd);
 
+	int status = batch_queue_submit(queue,task);
 
-	int status = batch_job_submit(queue,cmd,files,"output.log",batch_env,resources);
-
+	batch_job_delete(task);
+	
 	free(cmd);
-	free(files);
 	free(worker);
 
 	return status;
@@ -548,7 +594,7 @@ void remove_all_workers( struct batch_queue *queue, struct itable *job_table )
 	itable_firstkey(job_table);
 	while(itable_nextkey(job_table,&jobid,&value)) {
 		debug(D_WQ,"removing job %"PRId64,jobid);
-		batch_job_remove(queue,jobid);
+		batch_queue_remove(queue,jobid);
 	}
 	debug(D_WQ,"%d workers removed.",count);
 
@@ -674,6 +720,12 @@ struct jx *factory_to_jx(struct list *managers, struct list *foremen, int submit
 	}
 	jx_insert(j, jx_string("foremen"), fs);
 
+	char username[USERNAME_MAX];
+	if(username_get(username)) {
+		jx_insert_string(j,"owner",username);
+	}
+	jx_insert_string(j,"version",CCTOOLS_VERSION);
+	
 	return j;
 }
 
@@ -1041,8 +1093,8 @@ static void mainloop( struct batch_queue *queue )
 
 		while(1) {
 			struct batch_job_info info;
-			batch_job_id_t jobid;
-			jobid = batch_job_wait_timeout(queue,&info,stoptime);
+			batch_queue_id_t jobid;
+			jobid = batch_queue_wait_timeout(queue,&info,stoptime);
 			if(jobid>0) {
 				if(itable_lookup(job_table,jobid)) {
 					itable_remove(job_table,jobid);
@@ -1135,6 +1187,7 @@ static void show_help(const char *cmd)
 	printf(" %-30s Set the number of GPUs requested per worker.\n", "--gpus=<n>");
 	printf(" %-30s Set the amount of memory (in MB) per worker.\n", "--memory=<mb>           ");
 	printf(" %-30s Set the amount of disk (in MB) per worker.\n", "--disk=<mb>");
+	printf(" %-30s Add a custom feature to each worker.\n", "--feature=<name>");
 	printf(" %-30s Autosize worker to slot (Condor, Mesos, K8S).\n", "--autosize");
 
 	printf("\nWorker environment options:\n");
@@ -1144,15 +1197,13 @@ static void show_help(const char *cmd)
 	printf(" %-30s Wrap factory with this command prefix.\n","--wrapper");
 	printf(" %-30s Add this input file needed by the wrapper.\n","--wrapper-input");
 	printf(" %-30s Use runos tool to create environment (ND only).\n","--runos=<img>");
-	printf(" %-30s Run each worker inside this python environment.\n","--python-env=<file.tar.gz>");
+	printf(" %-30s Run each worker inside this poncho environment.\n","--poncho-env=<file.tar.gz>");
 
 	printf("\nOptions specific to batch systems:\n");
 	printf(" %-30s Generic batch system options.\n", "-B,--batch-options=<options>");
+	printf(" %-30s Disable check for use of AFS with HTCondor.\n", "--disable-afs-check");
 	printf(" %-30s Specify Amazon config file.\n", "--amazon-config");
 	printf(" %-30s Set requirements for the workers as Condor jobs.\n", "--condor-requirements");
-	printf(" %-30s Host name of mesos manager node..\n", "--mesos-master");
-	printf(" %-30s Path to mesos python library..\n", "--mesos-path");
-	printf(" %-30s Libraries for running mesos.\n", "--mesos-preload");
 	printf(" %-30s Container image for Kubernetes.\n", "--k8s-image");
 	printf(" %-30s Container image with worker for Kubernetes.\n", "--k8s-worker-image");
 
@@ -1162,6 +1213,7 @@ enum{   LONG_OPT_CORES = 255,
 		LONG_OPT_MEMORY, 
 		LONG_OPT_DISK, 
 		LONG_OPT_GPUS, 
+	        LONG_OPT_FEATURE,
 		LONG_OPT_TASKS_PER_WORKER, 
 		LONG_OPT_CONF_FILE, 
 		LONG_OPT_AMAZON_CONFIG, 
@@ -1172,9 +1224,6 @@ enum{   LONG_OPT_CORES = 255,
 		LONG_OPT_WRAPPER, 
 		LONG_OPT_WRAPPER_INPUT,
 		LONG_OPT_WORKER_BINARY,
-		LONG_OPT_MESOS_MANAGER, 
-		LONG_OPT_MESOS_PATH,
-		LONG_OPT_MESOS_PRELOAD,
 		LONG_OPT_K8S_IMAGE,
 		LONG_OPT_K8S_WORKER_IMAGE,
 		LONG_OPT_CATALOG,
@@ -1182,9 +1231,10 @@ enum{   LONG_OPT_CORES = 255,
 		LONG_OPT_RUN_AS_MANAGER,
 		LONG_OPT_RUN_OS,
 		LONG_OPT_PARENT_DEATH,
-		LONG_OPT_PYTHON_PACKAGE,
+		LONG_OPT_PONCHO_ENV,
 		LONG_OPT_USE_SSL,
-		LONG_OPT_FACTORY_NAME
+		LONG_OPT_FACTORY_NAME,
+		LONG_OPT_DISABLE_AFS_CHECK,
 	};
 
 static const struct option long_options[] = {
@@ -1200,10 +1250,12 @@ static const struct option long_options[] = {
 	{"debug", required_argument, 0, 'd'},
 	{"debug-file", required_argument, 0, 'o'},
 	{"debug-file-size", required_argument, 0, 'O'},
+	{"disable-afs-check", no_argument, 0, LONG_OPT_DISABLE_AFS_CHECK },
 	{"disk",   required_argument,  0,  LONG_OPT_DISK},
 	{"env", required_argument, 0, LONG_OPT_ENVIRONMENT_VARIABLE},
 	{"extra-options", required_argument, 0, 'E'},
 	{"factory-timeout", required_argument, 0, LONG_OPT_FACTORY_TIMEOUT},
+	{"feature", required_argument, 0, LONG_OPT_FEATURE},
 	{"foremen-name", required_argument, 0, 'F'},
 	{"gpus",   required_argument,  0,  LONG_OPT_GPUS},
 	{"help", no_argument, 0, 'h'},
@@ -1213,14 +1265,12 @@ static const struct option long_options[] = {
 	{"master-name", required_argument, 0, 'M'},
 	{"max-workers", required_argument, 0, 'W'},
 	{"memory", required_argument,  0,  LONG_OPT_MEMORY},
-	{"mesos-master", required_argument, 0, LONG_OPT_MESOS_MANAGER},
-	{"mesos-path", required_argument, 0, LONG_OPT_MESOS_PATH},
-	{"mesos-preload", required_argument, 0, LONG_OPT_MESOS_PRELOAD},
 	{"min-workers", required_argument, 0, 'w'},
 	{"parent-death", no_argument, 0, LONG_OPT_PARENT_DEATH},
 	{"password", required_argument, 0, 'P'},
-	{"python-env", required_argument, 0, LONG_OPT_PYTHON_PACKAGE},
-	{"python-package", required_argument, 0, LONG_OPT_PYTHON_PACKAGE}, //same as python-env, kept for compatibility
+	{"poncho-env", required_argument, 0, LONG_OPT_PONCHO_ENV},
+	{"python-env", required_argument, 0, LONG_OPT_PONCHO_ENV}, // backwards compatibility
+	{"python-package", required_argument, 0, LONG_OPT_PONCHO_ENV}, // backwards compatibility
 	{"run-factory-as-manager", no_argument, 0, LONG_OPT_RUN_AS_MANAGER},
 	{"runos", required_argument, 0, LONG_OPT_RUN_OS},
 	{"scratch-dir", required_argument, 0, 'S' },
@@ -1239,9 +1289,6 @@ static const struct option long_options[] = {
 
 int main(int argc, char *argv[])
 {
-	char *mesos_manager = NULL;
-	char *mesos_path = NULL;
-	char *mesos_preload = NULL;
 	char *k8s_image = NULL;
 
 	wrapper_inputs = list_create();
@@ -1254,6 +1301,7 @@ int main(int argc, char *argv[])
 	char *env = NULL;
 	char *val = NULL;
 	batch_env = jx_object(NULL);
+	features_table = hash_table_create(0,0);
 
 	batch_queue_type_t batch_queue_type = BATCH_QUEUE_TYPE_UNKNOWN;
 
@@ -1339,6 +1387,9 @@ int main(int argc, char *argv[])
 			case LONG_OPT_GPUS:
 				resources->gpus = atoi(optarg);
 				break;
+			case LONG_OPT_FEATURE:
+				hash_table_insert(features_table,optarg,"true");
+				break;
 			case LONG_OPT_AUTOSIZE:
 				autosize = 1;
 				break;
@@ -1354,9 +1405,9 @@ int main(int argc, char *argv[])
 					condor_requirements = string_format("(%s)", optarg);
 				}
 				break;
-			case LONG_OPT_PYTHON_PACKAGE:
+			case LONG_OPT_PONCHO_ENV:
 				{
-				// --package X is the equivalent of --wrapper "poncho_package_run X" --wrapper-input X
+				// --poncho-env X is the equivalent of --wrapper "poncho_package_run X" --wrapper-input X
 				char *fullpath = path_which("poncho_package_run");
 				if(!fullpath) {
 					fprintf(stderr,"work_queue_factory: could not find poncho_package_run in PATH");
@@ -1407,15 +1458,6 @@ int main(int argc, char *argv[])
 			case 'h':
 				show_help(argv[0]);
 				exit(EXIT_SUCCESS);
-			case LONG_OPT_MESOS_MANAGER:
-				mesos_manager = xxstrdup(optarg);
-				break;
-			case LONG_OPT_MESOS_PATH:
-				mesos_path = xxstrdup(optarg);
-				break;
-			case LONG_OPT_MESOS_PRELOAD:
-				mesos_preload = xxstrdup(optarg);
-				break;
 			case LONG_OPT_K8S_IMAGE:
 				k8s_image = xxstrdup(optarg);
 				break;
@@ -1440,6 +1482,9 @@ int main(int argc, char *argv[])
 				break;
 			case LONG_OPT_FACTORY_NAME:
 				factory_name = xxstrdup(optarg);
+				break;
+			case LONG_OPT_DISABLE_AFS_CHECK:
+				disable_afs_check = 1;
 				break;
 			default:
 				show_help(argv[0]);
@@ -1524,14 +1569,22 @@ int main(int argc, char *argv[])
 	/*
 	Careful here: most of the supported batch systems expect
 	that jobs are submitting from a single shared filesystem.
-	Changing to /tmp only works in the case of Condor.
+	In general, we will put log files into a subdir of the
+	current working directory, with a unique name to separate
+	factory instances.
+
+	However, HTCondor has two constraints:
+	1 - Recent versions of HTCondor insist upon the user log
+	being written to a file under $HOME, for reasons unknown.
+	It will emit errors at submit time if this happens.
+
+	2 - Condor cannot easily deal with files submitted from
+	an AFS home directory, without making things world writeable.
+	We will complain about that here.
 	*/
+
 	if(!scratch_dir) {
-		const char *scratch_parent_dir = ".";
-		if(batch_queue_type==BATCH_QUEUE_TYPE_CONDOR) {
-			scratch_parent_dir = system_tmp_dir(NULL);
-		}
-		scratch_dir = string_format("%s/wq-factory-%d", scratch_parent_dir, getuid());
+		scratch_dir = string_format("wq-factory-%d",getuid());
 	}
 
 	if(!create_dir(scratch_dir,0777)) {
@@ -1539,12 +1592,26 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	if(batch_queue_type==BATCH_QUEUE_TYPE_CONDOR && !disable_afs_check) {
+		char *absolute_scratch_dir = realpath(scratch_dir,0);
+		if(!absolute_scratch_dir) {
+			fprintf(stderr,"work_queue_factory: couldn't get full path of %s: %s\n",scratch_dir,strerror(errno));
+			return 1;
+		}
 
+		if(!strncmp(absolute_scratch_dir,"/afs",4)) {
+			fprintf(stderr,"work_queue_factory: The scratch directory is '%s'\n", absolute_scratch_dir);
+			fprintf(stderr,"This won't work because Condor is not able to write to files in AFS.\n");
+			fprintf(stderr,"Please use --scratch-dir to choose a different scratch directory.\n");
+			return 1;
+		}
+	}
+		
 	const char *item = NULL;
 	list_first_item(wrapper_inputs);
 	while((item = list_next_item(wrapper_inputs))) {
 		char *file_at_scratch_dir = string_format("%s/%s", scratch_dir, path_basename(item));
-		int result = copy_file_to_file(item, file_at_scratch_dir);
+		int64_t result = copy_file_to_file(item, file_at_scratch_dir);
 		if(result < 0) {
 			fprintf(stderr,"work_queue_factory: Cannot copy wrapper input file %s to factory scratch directory %s:\n", item, file_at_scratch_dir);
 			fprintf(stderr,"%s\n", strerror(errno));
@@ -1592,7 +1659,7 @@ int main(int argc, char *argv[])
 	signal(SIGTERM, handle_abort);
 	signal(SIGHUP, ignore_signal);
 
-	queue = batch_queue_create(batch_queue_type);
+	queue = batch_queue_create(batch_queue_type,0,0);
 	if(!queue) {
 		fprintf(stderr,"work_queue_factory: couldn't establish queue type %s",batch_queue_type_to_string(batch_queue_type));
 		return 1;
@@ -1612,29 +1679,15 @@ int main(int argc, char *argv[])
 		batch_queue_set_option(queue, "condor-requirements", condor_requirements);
 	}
 
-	if(batch_queue_type == BATCH_QUEUE_TYPE_MESOS) {
-		batch_queue_set_option(queue, "mesos-path", mesos_path);
-		batch_queue_set_option(queue, "mesos-master", mesos_manager);
-		batch_queue_set_option(queue, "mesos-preload", mesos_preload);
-		batch_queue_set_logfile(queue, "work_queue_factory.mesoslog");
-	}
-	
 	if(batch_queue_type == BATCH_QUEUE_TYPE_K8S) {
 		batch_queue_set_option(queue, "k8s-image", k8s_image);
 	}
 
 	mainloop( queue );
 
-	if(batch_queue_type == BATCH_QUEUE_TYPE_MESOS) {
-
-		batch_queue_set_int_option(queue, "batch-queue-abort-flag", (int)abort_flag);
-		batch_queue_set_int_option(queue, "batch-queue-failed-flag", 0);
-
-	}
-
 	batch_queue_delete(queue);
 
 	return 0;
 }
 
-/* vim: set noexpandtab tabstop=4: */
+/* vim: set noexpandtab tabstop=8: */

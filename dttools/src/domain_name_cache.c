@@ -6,13 +6,13 @@ See the file COPYING for details.
 */
 
 #include "domain_name_cache.h"
-#include "hash_cache.h"
 #include "debug.h"
+#include "hash_cache.h"
+#include "stringtools.h"
 
-#include <stdlib.h>
-#include <string.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/utsname.h>
 
@@ -24,16 +24,16 @@ static struct hash_cache *addr_to_name = 0;
 
 static int domain_name_cache_init()
 {
-	if(!name_to_addr) {
+	if (!name_to_addr) {
 		name_to_addr = hash_cache_create(127, hash_string, free);
-		if(!name_to_addr) {
+		if (!name_to_addr) {
 			return 0;
 		}
 	}
 
-	if(!addr_to_name) {
+	if (!addr_to_name) {
 		addr_to_name = hash_cache_create(127, hash_string, free);
-		if(!addr_to_name) {
+		if (!addr_to_name) {
 			return 0;
 		}
 	}
@@ -52,21 +52,21 @@ int domain_name_cache_lookup(const char *name, char *addr)
 	char *found, *copy;
 	int success;
 
-	if(!domain_name_cache_init())
+	if (!domain_name_cache_init())
 		return 0;
 
 	found = hash_cache_lookup(name_to_addr, name);
-	if(found) {
+	if (found) {
 		strcpy(addr, found);
 		return 1;
 	}
 
 	success = domain_name_lookup(name, addr);
-	if(!success)
+	if (!success)
 		return 0;
 
 	copy = strdup(addr);
-	if(!copy)
+	if (!copy)
 		return 1;
 
 	success = hash_cache_insert(name_to_addr, name, copy, DOMAIN_NAME_CACHE_LIFETIME);
@@ -79,21 +79,21 @@ int domain_name_cache_lookup_reverse(const char *addr, char *name)
 	char *found, *copy;
 	int success;
 
-	if(!domain_name_cache_init())
+	if (!domain_name_cache_init())
 		return 0;
 
 	found = hash_cache_lookup(addr_to_name, addr);
-	if(found) {
+	if (found) {
 		strcpy(name, found);
 		return 1;
 	}
 
 	success = domain_name_lookup_reverse(addr, name);
-	if(!success)
+	if (!success)
 		return 0;
 
 	copy = strdup(name);
-	if(!copy)
+	if (!copy)
 		return 1;
 
 	success = hash_cache_insert(addr_to_name, addr, copy, DOMAIN_NAME_CACHE_LIFETIME);
@@ -107,15 +107,15 @@ static int guess_dns_domain(char *domain)
 	FILE *file;
 
 	file = fopen("/etc/resolv.conf", "r");
-	if(!file)
+	if (!file)
 		return 0;
 
-	while(fgets(line, sizeof(line), file)) {
-		if(sscanf(line, "search %[^ \t\n]", domain) == 1) {
+	while (fgets(line, sizeof(line), file)) {
+		if (sscanf(line, "search %[^ \t\n]", domain) == 1) {
 			fclose(file);
 			return 1;
 		}
-		if(sscanf(line, "domain %[^ \t\n]", domain) == 1) {
+		if (sscanf(line, "domain %[^ \t\n]", domain) == 1) {
 			fclose(file);
 			return 1;
 		}
@@ -131,22 +131,42 @@ int domain_name_cache_guess(char *name)
 	char addr[DOMAIN_NAME_MAX];
 	char domain[DOMAIN_NAME_MAX];
 
-	if(uname(&n) < 0)
+	if (uname(&n) < 0)
 		return 0;
 
-	if(!domain_name_cache_lookup(n.nodename, addr))
-		return 0;
-	if(!domain_name_cache_lookup_reverse(addr, name))
-		return 0;
+	/*
+	A common situation in testing and other isolated situations
+	is a machine whose uname ends in .local indicating that it
+	does not correspond to a domain name, and may not event be
+	int /etc/hosts.  Attempting to look this up via DNS results
+	in long delays.  Short circuit that situation by failing quickly.
+	*/
+
+	if (string_match_regex(n.nodename, "^.*\\.local$")) {
+		strcpy(name, n.nodename);
+		return 1;
+	}
+
+	/* Otherwise, take the nodename, and look it up in DNS and then reverse it. */
+
+	if (!domain_name_cache_lookup(n.nodename, addr)) {
+		strcpy(name, n.nodename);
+		return 1;
+	}
+
+	if (!domain_name_cache_lookup_reverse(addr, name)) {
+		strcpy(name, n.nodename);
+		return 1;
+	}
 
 	debug(D_DNS, "finding my hostname: uname = %s, address = %s, hostname = %s", n.nodename, addr, name);
 
-	if(!strncmp(name, "localhost", 9) || !strcmp(addr, "127.0.0.1")) {
+	if (!strncmp(name, "localhost", 9) || !strcmp(addr, "127.0.0.1")) {
 		debug(D_DNS, "local address of '%s' (%s) is not very useful.", name, addr);
-		if(guess_dns_domain(domain)) {
+		if (guess_dns_domain(domain)) {
 			sprintf(name, "%s.%s", n.nodename, domain);
 			debug(D_DNS, "but /etc/resolv.conf says domain = %s so hostname = %s", domain, name);
-			if(!domain_name_cache_lookup(name, addr)) {
+			if (!domain_name_cache_lookup(name, addr)) {
 				debug(D_DNS, "unfortunately %s is meaningless, so going back to %s", name, n.nodename);
 				sprintf(name, "%s", n.nodename);
 			}
@@ -166,18 +186,18 @@ int domain_name_cache_guess_short(char *name)
 {
 	struct utsname n;
 
-	if(got_shortname) {
+	if (got_shortname) {
 		strcpy(name, shortname);
 		return 1;
 	}
 
-	if(uname(&n) < 0)
+	if (uname(&n) < 0)
 		return 0;
 
 	strcpy(shortname, n.nodename);
 
 	char *p = strchr(shortname, '.');
-	if(p)
+	if (p)
 		*p = 0;
 
 	strcpy(name, shortname);
@@ -186,4 +206,4 @@ int domain_name_cache_guess_short(char *name)
 	return 1;
 }
 
-/* vim: set noexpandtab tabstop=4: */
+/* vim: set noexpandtab tabstop=8: */

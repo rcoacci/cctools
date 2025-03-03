@@ -65,12 +65,14 @@ const char *chirp_client_readdir(struct chirp_client *c, time_t stoptime);
 INT64_T chirp_client_getacl(struct chirp_client *c, const char *path, chirp_dir_t callback, void *arg, time_t stoptime);
 INT64_T chirp_client_openacl(struct chirp_client *c, const char *path, time_t stoptime);
 const char *chirp_client_readacl(struct chirp_client *c, time_t stoptime);
+
 INT64_T chirp_client_ticket_create(struct chirp_client *c, char name[CHIRP_PATH_MAX], unsigned bits, time_t stoptime);
 INT64_T chirp_client_ticket_register(struct chirp_client *c, const char *name, const char *subject, time_t duration, time_t stoptime);
-INT64_T chirp_client_ticket_delete(struct chirp_client *c, const char *name, time_t stoptime);
-INT64_T chirp_client_ticket_list(struct chirp_client *c, const char *subject, char ***list, time_t stoptime);
-INT64_T chirp_client_ticket_get(struct chirp_client *c, const char *name, char **subject, char **ticket, time_t * duration, char ***rights, time_t stoptime);
 INT64_T chirp_client_ticket_modify(struct chirp_client *c, const char *name, const char *path, const char *aclmask, time_t stoptime);
+INT64_T chirp_client_ticket_get(struct chirp_client *c, const char *name, char **subject, char **ticket, time_t * duration, char ***rights, time_t stoptime);
+INT64_T chirp_client_ticket_list(struct chirp_client *c, const char *subject, char ***list, time_t stoptime);
+INT64_T chirp_client_ticket_delete(struct chirp_client *c, const char *name, time_t stoptime);
+
 INT64_T chirp_client_setacl(struct chirp_client *c, const char *path, const char *user, const char *acl, time_t stoptime);
 INT64_T chirp_client_resetacl(struct chirp_client *c, const char *path, const char *acl, time_t stoptime);
 INT64_T chirp_client_locate(struct chirp_client *c, const char *path, chirp_loc_t callback, void *arg, time_t stoptime);
@@ -131,12 +133,12 @@ INT64_T chirp_client_fstat_begin(struct chirp_client *c, INT64_T fd, struct chir
 INT64_T chirp_client_fstat_finish(struct chirp_client *c, INT64_T fd, struct chirp_stat *buf, time_t stoptime);
 
 INT64_T chirp_client_job_create(struct chirp_client *c, const char *json, chirp_jobid_t *id, time_t stoptime);
-INT64_T chirp_client_job_commit(struct chirp_client *c, const char *json, time_t stoptime);
-INT64_T chirp_client_job_kill(struct chirp_client *c, const char *json, time_t stoptime);
-INT64_T chirp_client_job_status(struct chirp_client *c, const char *json, char **status, time_t stoptime);
+INT64_T chirp_client_job_commit(struct chirp_client *c, chirp_jobid_t id, time_t stoptime);
+INT64_T chirp_client_job_kill(struct chirp_client *c, chirp_jobid_t id, time_t stoptime);
+INT64_T chirp_client_job_status(struct chirp_client *c, chirp_jobid_t id, char **status, time_t stoptime);
 INT64_T chirp_client_job_wait(struct chirp_client *c, chirp_jobid_t id, INT64_T timeout, char **status, time_t stoptime);
-INT64_T chirp_client_job_reap(struct chirp_client *c, const char *json, time_t stoptime);
+INT64_T chirp_client_job_reap(struct chirp_client *c, chirp_jobid_t id, time_t stoptime);
 
 #endif
 
-/* vim: set noexpandtab tabstop=4: */
+/* vim: set noexpandtab tabstop=8: */

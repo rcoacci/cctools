@@ -85,10 +85,14 @@ struct category {
     /* manager for bucketing mode, if applicable */
     bucketing_manager_t* bucketing_manager;
 
+  /* number of tasks completed */
 	int64_t total_tasks;
 
 	/* completions since last time first-allocation was updated. */
 	int64_t completions_since_last_reset;
+
+  /* maximum number of tasks of this category allowed to be running concurrently. If less than 0, unlimited. */
+  int64_t max_concurrent;
 
 	/* category is somewhat confident of the maximum seen value. */
 	int steady_state;
@@ -99,6 +103,9 @@ struct category {
 
 	/* stats for taskvine */
 	struct vine_stats *vine_stats;
+
+	/* Max sandbox disk space observed, in MB. This is the minimum sandbox size needed if nothing else is known about the task.*/
+	int64_t min_vine_sandbox;
 
 	/* variables for makeflow */
 	/* Mappings between variable names defined in the makeflow file and their values. */

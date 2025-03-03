@@ -12,14 +12,11 @@ from . import cvine
 from .file import File
 
 import copy
-import json
 import os
-import shutil
 import sys
-import tempfile
 import textwrap
 import uuid
-import weakref
+import cloudpickle
 
 
 ##
@@ -38,7 +35,7 @@ class Task(object):
     def __init__(self, command, **task_info):
         self._task = None
 
-        self._manager = None  # set by submit_finalize
+        self._manager = None  # set when task is submitted
 
         if isinstance(command, dict):
             raise TypeError(f"{command} is not a str. Did you mean **{command}?")
@@ -51,10 +48,10 @@ class Task(object):
         if not self._task:
             raise Exception("Unable to create internal Task structure")
 
-        self._finalizer = weakref.finalize(self, self._free)
-
         attributes = [
-            "coprocess", "scheduler", "tag", "category",
+            "library_required",
+            "library_provided",
+            "scheduler", "tag", "category",
             "snapshot_file", "retries", "cores", "memory",
             "disk", "gpus", "priority", "time_end",
             "time_start", "time_max", "time_min", "monitor_output"
@@ -110,20 +107,26 @@ class Task(object):
         except KeyError:
             pass
 
-    def _free(self):
-        if not self._task:
-            return
-        if self._manager_will_free:
-            return
-        if self._manager and self._manager._finalizer.alive and self.id in self._manager._task_table:
-            # interpreter is shutting down. Don't delete task here so that manager
-            # does not get memory errors
-            return
-        cvine.vine_task_delete(self._task)
-        self._task = None
+    def __del__(self):
+        try:
+            if not self._task:
+                return
+            if self._manager_will_free:
+                # e.g., for a minitask that won't be in self.manager._task_table
+                # otherwise the task gets a double-free
+                return
+            if self.manager and self.id in self.manager._task_table:
+                # interpreter is shutting down. Don't delete task here so that manager
+                # does not get memory errors
+                return
+            cvine.vine_task_delete(self._task)
+            self._task = None
+        except TypeError:
+            # modules were freed before task (e.g. interpreter shutdown)
+            pass
 
     @staticmethod
-    def _determine_mount_flags(watch=False, failure_only=False, success_only=False, strict_input=False):
+    def _determine_mount_flags(watch=False, failure_only=False, success_only=False, strict_input=False, mount_symlink=False):
         flags = cvine.VINE_TRANSFER_ALWAYS
         if watch:
             flags |= cvine.VINE_WATCH
@@ -133,18 +136,35 @@ class Task(object):
             flags |= cvine.VINE_SUCCESS_ONLY
         if strict_input:
             flags |= cvine.VINE_FIXED_LOCATION
+        if mount_symlink:
+            flags |= cvine.VINE_MOUNT_SYMLINK
         return flags
 
     @staticmethod
-    def _determine_file_flags(cache=False, peer_transfer=False):
-        flags = cvine.VINE_CACHE_NEVER
-        if cache is True or cache == "workflow":
-            flags |= cvine.VINE_CACHE
-        if cache == "always":
-            flags |= cvine.VINE_CACHE_ALWAYS
+    def _determine_file_flags(peer_transfer=False, unlink_when_done=False):
+        flags = 0
         if not peer_transfer:
             flags |= cvine.VINE_PEER_NOSHARE
+        if unlink_when_done:
+            flags |= cvine.VINE_UNLINK_WHEN_DONE
         return flags
+
+    @staticmethod
+    def _determine_cache_level(cache=False):
+        cache_level = cvine.VINE_CACHE_LEVEL_TASK
+
+        if cache is True or cache == "workflow":
+            cache_level = cvine.VINE_CACHE_LEVEL_WORKFLOW
+        elif cache == "worker":
+            cache_level = cvine.VINE_CACHE_LEVEL_WORKER
+        elif cache == "forever":
+            cache_level = cvine.VINE_CACHE_LEVEL_FOREVER
+        elif not cache or cache == "task":
+            cache_level = cvine.VINE_CACHE_LEVEL_TASK
+        else:
+            raise ValueError(f"{cache} is not a valid cache level")
+
+        return cache_level
 
     ##
     # Finalizes the task definition once the manager that will execute is run.
@@ -152,8 +172,15 @@ class Task(object):
     # execution.
     #
     # @param self 	Reference to the current python task object
-    # @param manager Manager to which the task was submitted
-    def submit_finalize(self, manager):
+    def submit_finalize(self):
+        pass
+
+    @property
+    def manager(self):
+        return self._manager
+
+    @manager.setter
+    def manager(self, manager):
         self._manager = manager
 
     ##
@@ -174,13 +201,92 @@ class Task(object):
         return cvine.vine_task_set_command(self._task, command)
 
     ##
-    # Set the coprocess at the worker that should execute the task's command.
+    # Compute the name of a given library
+    # @param self          Reference to the current task object.
+    # @param library       The library or the name of the library
+    def _compute_library_name(self, library):
+        library_name = None
+        if isinstance(library, Task):
+            try:
+                library_name = library.provides_library()
+            except Exception:
+                pass
+        else:
+            library_name = library
+
+        if not isinstance(library, str):
+            raise ValueError(f"{library} is not a valid library")
+
+        return library_name
+
+    ##
+    # Set the name of the library at the worker that should execute the task's command.
+    # This is not needed for regular tasks.
+    #
+    # @param self          Reference to the current task object.
+    # @param library       The library or the name of the library
+    def set_library_required(self, library):
+        library_name = self._compute_library_name(library)
+        if self.get_libray_provided():
+            raise ValueError(
+                f"A task cannot both provide ({library_name}) and require ({library_name}) a library."
+            )
+        return cvine.vine_task_set_library_required(self._task, library_name)
+
+    ##
+    # Get the name of the library at the worker that should execute the task's command.
+    #
+    # @param self Reference to the current task object.
+    def get_library_required(self):
+        return cvine.vine_task_get_library_required(self._task)
+
+    ##
+    # Deprecated, see set_library_required
+    def needs_library(self, library):
+        return self.set_library_required(library)
+
+    ##
+    # Set the library name provided by this task.
+    # This is not needed for regular tasks.
+    #
+    # @param self Reference to the current task object.
+    # @param library_name The name of the library.
+    def set_library_provided(self, library_name):
+        if self.get_library_required():
+            raise ValueError(
+                f"A task cannot both provide ({library_name}) and require ({self.get_library_required()}) a library."
+            )
+        return cvine.vine_task_set_library_provided(self._task, library_name)
+
+    ##
+    # Get the name of the library at the worker that should execute the task's command.
+    #
+    # @param self Reference to the current task object.
+    def get_libray_provided(self):
+        return cvine.vine_task_get_library_provided(self._task)
+
+    ##
+    # Deprecated, see set_library_provided
+    def provides_library(self, library):
+        return self.set_library_provided(library)
+
+    ##
+    # Set the number of concurrent functions a library can run.
+    # This is not needed for regular tasks.
+    #
+    # @param self Reference to the current task object.
+    # @param nslots The maximum number of concurrent functions this library can run.
+    def set_function_slots(self, nslots):
+        return cvine.vine_task_set_function_slots(self._task, nslots)
+
+    ##
+    # Set the execution mode of functions in a library.
     # This is not needed for regular tasks.
     #
     # @param self       Reference to the current task object.
-    # @param coprocess  The name of the coprocess.
-    def set_coprocess(self, coprocess):
-        return cvine.vine_task_set_coprocess(self._task, coprocess)
+    # @param exec_mode  The execution mode of functions in a library. Either 'fork' or 'direct'.
+    def set_function_exec_mode_from_string(self, exec_mode):
+        return cvine.vine_task_set_function_exec_mode_from_string(self._task, exec_mode)
 
     ##
     # Set the worker selection scheduler for task.
@@ -235,14 +341,14 @@ class Task(object):
     # >>> f = m.declare_untar(url)
     # >>> task.add_input(f,"data")
     # @endcode
-    def add_input(self, file, remote_name, strict_input=False):
+    def add_input(self, file, remote_name, strict_input=False, mount_symlink=False):
         # SWIG expects strings
         if not isinstance(remote_name, str):
             raise TypeError(f"remote_name {remote_name} is not a str")
 
-        flags = Task._determine_mount_flags(strict_input=strict_input)
+        flags = Task._determine_mount_flags(strict_input=strict_input, mount_symlink=mount_symlink)
 
-        if cvine.vine_task_add_input(self._task, file._file, remote_name, flags)==0:
+        if cvine.vine_task_add_input(self._task, file._file, remote_name, flags) == 0:
             raise ValueError("invalid file description")
 
     ##
@@ -266,7 +372,7 @@ class Task(object):
             raise TypeError(f"remote_name {remote_name} is not a str")
 
         flags = Task._determine_mount_flags(watch, failure_only, success_only)
-        if cvine.vine_task_add_output(self._task, file._file, remote_name, flags)==0:
+        if cvine.vine_task_add_output(self._task, file._file, remote_name, flags) == 0:
             raise ValueError("invalid file description")
 
     ##
@@ -332,23 +438,61 @@ class Task(object):
         return cvine.vine_task_set_snapshot_file(self._task, filename)
 
     ##
-    # Adds an execution environment to the task. The environment file specified
-    # is expected to expand to a directory with a bin/run_in_env file that will wrap
-    # the task command (e.g. a poncho or a starch file, or any other vine mini_task
-    # that creates such a wrapper). If specified multiple times,
-    # environments are nested in the order given (i.e. first added is the first applied).
-    # @param self Reference to the current task object.
-    # @param f The environment file.
+    # Add a Starch package as an execution context.
+    # The file given must refer to a (unpacked) package
+    # containing libraries captured by the <tt>starch</tt> command.
+    # The task will execute using this package as its environment.
+    # @param t A task object.
+    # @param f A file containing an unpacked Starch package.
+    def add_starch_package(self, file):
+        return cvine.vine_task_add_starch_package(self._task, file._file)
+
+    ##
+    # Add a Poncho package as an execution context.
+    # The file given must refer to a (unpacked) PONCHO package,
+    # containing a set of Python modules needed by the task.
+    # The task will execute using this package as its Python environment.
+    # @param t A task object.
+    # @param f A file containing an unpacked Poncho package.
+    def add_poncho_package(self, file):
+        return cvine.vine_task_add_poncho_package(self._task, file._file)
+
+    ##
+    # Adds an execution context to the task.
+    # The context file given must expand to a directory containing
+    # (at a minimum) a file
+    # named bin/run_in_env that will perform any desired setup
+    # (e.g. setting PATH, LD_LIBRARY_PATH, PYTHONPATH), execute the given command,
+    # and then perform any desired cleanup.  The context directory
+    # may also include any support files or libraries needed by the task.
+    # If specified multiple times, execution contexts are
+    # nested in the order given (i.e. first added is the first applied).
+    # @see add_poncho_package
+    # @see add_starch_package
+    # @param t A task object.
+    # @param f The execution context file.
+    def add_execution_context(self, f):
+        return cvine.vine_task_add_execution_context(self._task, f._file)
+
+    # Deprecated, for backwards compatibility.
     def add_environment(self, f):
         return cvine.vine_task_add_environment(self._task, f._file)
 
     ##
-    # Indicate the number of times the task should be retried. If 0 (the
+    # Indicate the number of times the task should be retried. If less than 1 (the
     # default), the task is tried indefinitely. A task that did not succeed
     # after the given number of retries is returned with result
-    # "result_max_retries".
+    # "max retries".
     def set_retries(self, max_retries):
         return cvine.vine_task_set_retries(self._task, max_retries)
+
+    ##
+    # Indicate the number of times the task can be returned to the manager
+    # without being executed. If less than 0 (the default), the task is tried indefinitely.
+    # A task that did not succeed after the given number of retries is returned
+    # with result "forsaken".
+    def set_max_forsaken(self, max_forsaken):
+        return cvine.vine_task_set_max_forsaken(self._task, max_forsaken)
 
     ##
     # Indicate the number of cores required by this task.
@@ -440,6 +584,15 @@ class Task(object):
         return cvine.vine_task_get_command(self._task)
 
     ##
+    # Get the state of the task.
+    # @code
+    # >>> print(t.command)
+    # @endcode
+    @property
+    def state(self):
+        return cvine.vine_task_get_state(self._task)
+
+    ##
     # Get the standard output of the task. Must be called only after the task
     # completes execution.
     # @code
@@ -452,6 +605,8 @@ class Task(object):
     ##
     # Get the standard output of the task. (Same as t.std_output for regular
     # taskvine tasks) Must be called only after the task completes execution.
+    # If this task is a FunctionCall task then we apply some transformations
+    # as FunctionCall returns a specifically formatted result.
     # @code
     # >>> print(t.output)
     # @endcode
@@ -472,7 +627,7 @@ class Task(object):
     # Get the exit code of the command executed by the task. Must be called only
     # after the task completes execution.
     # @code
-    # >>> print(t.return_status)
+    # >>> print(t.exit_code)
     # @endcode
     @property
     def exit_code(self):
@@ -564,7 +719,6 @@ class Task(object):
     # @code
     # >>> print(t.get_metric("total_submissions")
     # @endcode
-    @property
     def get_metric(self, name):
         return cvine.vine_task_get_metric(self._task, name)
 
@@ -637,23 +791,23 @@ class Task(object):
     # @endcode
     @property
     def resources_measured(self):
-        if not self._task.resources_measured:
+        if not self._task:
             return None
-
-        return self._task.resources_measured
+        return cvine.vine_task_get_resources(self._task, "measured")
 
     ##
     # Get the resources the task exceeded. For valid field see @ref ndcctools.taskvine.task.Task.resources_measured.
     #
     @property
     def limits_exceeded(self):
-        if not self._task.resources_measured:
+        if not self._task:
             return None
 
-        if not self._task.resources_measured.limits_exceeded:
+        measured = cvine.vine_task_get_resources(self._task, "measured")
+        if not measured:
             return None
 
-        return self._task.resources_measured.limits_exceeded
+        return measured.limits_exceeded
 
     ##
     # Get the resources the task requested to run. For valid fields see
@@ -661,9 +815,9 @@ class Task(object):
     #
     @property
     def resources_requested(self):
-        if not self._task.resources_requested:
+        if not self._task:
             return None
-        return self._task.resources_requested
+        return cvine.vine_task_get_resources(self._task, "requested")
 
     ##
     # Get the resources allocated to the task in its latest attempt. For valid
@@ -671,9 +825,22 @@ class Task(object):
     #
     @property
     def resources_allocated(self):
-        if not self._task.resources_allocated:
+        if not self._task:
             return None
-        return self._task.resources_allocated
+        return cvine.vine_task_get_resources(self._task, "allocated")
+
+    ##
+    # Adds inputs for nopen library and rules file and sets LD_PRELOAD
+    #
+    def add_nopen(self, manager):
+        try:
+            vine_dir = os.environ['CCTOOLS_HOME']
+            self.add_input(manager.declare_file(f"{vine_dir}/lib-nopen.so"), "./lib-nopen.so")
+        except KeyError:
+            self.add_input(manager.declare_file("./lib-nopen.so"), "./lib-nopen.so")
+            self.add_input(manager.declare_file("./rules.txt"), "./rules.txt")
+
+        self.set_env_var("LD_PRELOAD", "./lib-nopen.so")
 
 
 ##
@@ -683,16 +850,6 @@ class Task(object):
 #
 # The class represents a Task specialized to execute remote Python code.
 #
-
-try:
-    import cloudpickle
-    pythontask_available = True
-except Exception:
-    # Note that the intended exception here is ModuleNotFoundError.
-    # However, that type does not exist in Python 2
-    pythontask_available = False
-
-
 class PythonTask(Task):
     ##
     # Creates a new python task
@@ -702,23 +859,16 @@ class PythonTask(Task):
     # @param args	arguments used in function to be executed by task
     # @param kwargs	keyword arguments used in function to be executed by task
     def __init__(self, func, *args, **kwargs):
-        if not pythontask_available:
-            raise RuntimeError("PythonTask is not available. The cloudpickle module is missing.")
+        self._id = str(uuid.uuid4())
 
-        self._pp_run = None
         self._output_loaded = False
         self._output = None
-        self._stdout = None
-        self._tmpdir = None
 
-        self._id = str(uuid.uuid4())
-        self._func_file = f"function_{self._id}.p"
-        self._args_file = f"args_{self._id}.p"
-        self._out_name_file = f"out_{self._id}.p"
-        self._stdout_file = f"stdout_{self._id}.p"
-        self._wrapper = f"pytask_wrapper_{self._id}.py"
-        self._command = self._python_function_command()
         self._serialize_output = True
+
+        self._out_name_file = self._id
+
+        self._command = self._python_function_command()
 
         self._tmp_output_enabled = False
         self._cache_output = False
@@ -726,18 +876,14 @@ class PythonTask(Task):
         # vine File object that will contain the output of this function
         self._output_file = None
 
+        # vine File object with the serialized arguments to the function
+        self._input_file = None
+
         # we delay any PythonTask initialization until the task is submitted to
         # a manager. This is because we don't know the staging directory where
         # the task should write its files.
         self._fn_def = (func, args, kwargs)
         super(PythonTask, self).__init__(self._command)
-
-        self._finalizer = weakref.finalize(self, self._free)
-
-    def _free(self):
-        if self._tmpdir and os.path.exists(self._tmpdir):
-            shutil.rmtree(self._tmpdir)
-        super()._free()
 
     ##
     # Finalizes the task definition once the manager that will execute is run.
@@ -746,13 +892,23 @@ class PythonTask(Task):
     #
     # @param self 	Reference to the current python task object
     # @param manager Manager to which the task was submitted
-    def submit_finalize(self, manager):
-        super().submit_finalize(manager)
-        self._tmpdir = tempfile.mkdtemp(dir=manager.staging_directory)
-        self._serialize_python_function(*self._fn_def)
+    def submit_finalize(self):
+        super().submit_finalize()
+        self._add_inputs_outputs(self.manager, *self._fn_def)
         self._fn_def = None  # avoid possible memory leak
-        self._create_wrapper()
-        self._add_IO_files(manager)
+
+    # remove any ancillary files generated
+    # if __del__ is never called, or called too late (e.g. on interpreter shutdown),
+    # then temp files will be deleted in the atexit of the manager staging directory
+    def __del__(self):
+        try:
+            if self._input_file:
+                self.manager.undeclare_file(self._input_file)
+                self._input_file = None
+            super().__del__()
+        except TypeError:
+            # in case the interpreter is shuting down. staging files will be deleted by manager atexit function.
+            pass
 
     ##
     # Marks the output of this task to stay at the worker.
@@ -786,6 +942,9 @@ class PythonTask(Task):
     def enable_temp_output(self):
         self._tmp_output_enabled = True
 
+    def disable_temp_output(self):
+        self._tmp_output_enabled = False
+
     ##
     # Set the cache behavior for the output of the task.
     # @param cache   If True or 'workflow', cache the file at workers for reuse
@@ -813,7 +972,7 @@ class PythonTask(Task):
         if not self._output_loaded:
             if self.successful():
                 try:
-                    with open(os.path.join(self._tmpdir, self._out_name_file), "rb") as f:
+                    with open(self._output_file.source(), "rb") as f:
                         if self._serialize_output:
                             self._output = cloudpickle.load(f)
                         else:
@@ -826,16 +985,6 @@ class PythonTask(Task):
             self._output_loaded = True
         return self._output
 
-    @property
-    def std_output(self):
-        try:
-            if not self._stdout:
-                with open(os.path.join(self._tmpdir, self._stdout_file), "r") as f:
-                    self._stdout = str(f.read())
-            return self._stdout
-        except Exception:
-            return None
-
     ##
     # Disables serialization of results to disk when writing to a file for transmission.
     # WARNING: Only do this if the function itself encodes the output in a way amenable
@@ -845,74 +994,70 @@ class PythonTask(Task):
     def disable_output_serialization(self):
         self._serialize_output = False
 
-    def _serialize_python_function(self, func, args, kwargs):
-        with open(os.path.join(self._tmpdir, self._func_file), "wb") as wf:
-            cloudpickle.dump(func, wf)
-        with open(os.path.join(self._tmpdir, self._args_file), "wb") as wf:
-            cloudpickle.dump([args, kwargs], wf)
-
     def _python_function_command(self, remote_env_dir=None):
         if remote_env_dir:
             py_exec = "python"
         else:
             py_exec = f"python{sys.version_info[0]}"
 
-        command = f"{py_exec} {self._wrapper} {self._func_file} {self._args_file} {self._out_name_file} > {self._stdout_file} 2>&1"
+        command = f"{py_exec} w_{self._id} f_{self._id} a_{self._id} o_{self._id}"
         return command
 
-    def _add_IO_files(self, manager):
-        def source(name):
-            return os.path.join(self._tmpdir, name)
-        for name in [self._wrapper, self._func_file, self._args_file]:
-            f = manager.declare_file(source(name))
-            self.add_input(f, name)
+    def _add_inputs_outputs(self, manager, func, args, kwargs):
+        self.add_input(self._fn_wrapper(manager, self._serialize_output), f"w_{self._id}")
+        self.add_input(self._fn_buffer(manager, func), f"f_{self._id}")
 
-        f = manager.declare_file(source(self._stdout_file))
-        self.add_output(f, self._stdout_file)
+        name = os.path.join(manager.staging_directory, "arguments", self._id)
+        with open(name, "wb") as wf:
+            cloudpickle.dump([args, kwargs], wf)
+        self._input_file = manager.declare_file(name, unlink_when_done=True)
+        self.add_input(self._input_file, f"a_{self._id}")
 
         if self._tmp_output_enabled:
-            self._output_file = manager.declare_temp()
+            self._output_file = self.manager.declare_temp()
         else:
-            self._output_file = manager.declare_file(source(self._out_name_file), cache=self._cache_output)
-        self.add_output(self._output_file, self._out_name_file)
+            name = os.path.join(manager.staging_directory, "outputs", self._id)
+            self._output_file = manager.declare_file(name, cache=self._cache_output, unlink_when_done=False)
+        self.add_output(self._output_file, f"o_{self._id}")
 
-    ##
-    # creates the wrapper script which will execute the function. pickles output.
-    def _create_wrapper(self):
-        with open(os.path.join(self._tmpdir, self._wrapper), "w") as f:
-            f.write(
-                textwrap.dedent(
-                f"""
-                try:
-                    import sys
-                    import cloudpickle
-                except ImportError as e:
-                    print("Could not execute PythonTask function because a module was not available at the worker.")
-                    raise
+    def _fn_wrapper(self, manager, serialize):
+        base = f"py_wrapper_{int(bool(serialize))}"
+        if base not in manager._function_buffers:
+            name = os.path.join(manager.staging_directory, base)
+            with open(name, "w") as f:
+                f.write(textwrap.dedent(f"""
+                                        import sys
+                                        import cloudpickle
+                                        fn, args, out = sys.argv[1:]
 
-                (fn, args, out) = sys.argv[1], sys.argv[2], sys.argv[3]
-                with open (fn , 'rb') as f:
-                    exec_function = cloudpickle.load(f)
-                with open(args, 'rb') as f:
-                    args, kwargs = cloudpickle.load(f)
+                                        with open(fn, "rb") as f:
+                                            exec_function = cloudpickle.load(f)
+                                        with open(args, "rb") as f:
+                                            args, kwargs = cloudpickle.load(f)
 
-                status = 0
-                try:
-                    exec_out = exec_function(*args, **kwargs)
-                except Exception as e:
-                    exec_out = e
-                    status = 1
+                                        error = 0
+                                        try:
+                                            exec_out = exec_function(*args, **kwargs)
+                                        except Exception as e:
+                                            exec_out = e
+                                            error = e
+                                        finally:
+                                            with open(out, "wb") as f:
+                                                if {serialize}:
+                                                    cloudpickle.dump(exec_out, f)
+                                                else:
+                                                    f.write(exec_out)
+                                            if error:
+                                                raise error
+                                        """))
+                manager._function_buffers[base] = manager.declare_file(name, cache=True)
+        return manager._function_buffers[base]
 
-                with open(out, 'wb') as f:
-                    if {self._serialize_output}:
-                        cloudpickle.dump(exec_out, f)
-                    else:
-                        f.write(exec_out)
-
-                sys.exit(status)
-                """
-                )
-            )
+    def _fn_buffer(self, manager, fn):
+        if fn not in manager._function_buffers:
+            load = cloudpickle.dumps(fn)
+            manager._function_buffers[fn] = manager.declare_buffer(load, cache=True)
+        return manager._function_buffers[fn]
 
 
 class PythonTaskNoResult(Exception):
@@ -925,21 +1070,27 @@ class PythonTaskNoResult(Exception):
 # TaskVine FunctionCall object
 #
 # This class represents a task specialized to execute functions in a Library running on a worker.
-class FunctionCall(Task):
+class FunctionCall(PythonTask):
     ##
     # Create a new FunctionCall specification.
     #
     # @param self       Reference to the current FunctionCall object.
-    # @param fn         The name of the function to be executed on the coprocess
-    # @param coprocess  The name of the coprocess which has the function you wish to execute. The coprocess should have a name() method that returns this
+    # @param library    The library, or name of the library which has the function you wish to execute.
+    # @param fn         The name of the function to be executed on the library.
     # @param args       positional arguments used in function to be executed by task. Can be mixed with kwargs
-    # @param kwargs	    keyword arguments used in function to be executed by task.
-    def __init__(self, fn, coprocess, *args, **kwargs):
-        Task.__init__(self, fn)
+    # @param kwargs	keyword arguments used in function to be executed by task.
+    def __init__(self, library, fn, *args, **kwargs):
+        super().__init__(self, None)
+
+        # function calls at worker only need the name of the function.
+        self.set_command(fn)
+
         self._event = {}
-        self._event["fn_kwargs"] = kwargs
         self._event["fn_args"] = args
-        Task.set_coprocess(self, "library_coprocess:" + coprocess)
+        self._event["fn_kwargs"] = kwargs
+
+        self._saved_output = None
+        self.set_library_required(library)
 
     ##
     # Finalizes the task definition once the manager that will execute is run.
@@ -947,11 +1098,25 @@ class FunctionCall(Task):
     # execution.
     #
     # @param self 	Reference to the current python task object
-    # @param manager Manager to which the task was submitted
-    def submit_finalize(self, manager):
-        super().submit_finalize(manager)
-        f = manager.declare_buffer(json.dumps(self._event))
-        self.add_input(f, "infile")
+    def submit_finalize(self):
+        library_name = self.get_library_required()
+        if not self.manager.check_library_exists(library_name):
+            raise ValueError(f"invalid library name \'{library_name}\'")
+
+        name = os.path.join(self.manager.staging_directory, "arguments", self._id)
+        with open(name, "wb") as wf:
+            cloudpickle.dump(self._event, wf)
+        self._input_file = self.manager.declare_file(name, unlink_when_done=True, cache=False, peer_transfer=True)
+
+        if self._tmp_output_enabled:
+            self._output_file = self.manager.declare_temp()
+        else:
+            name = os.path.join(self.manager.staging_directory, "outputs", self._id)
+            self._output_file = self.manager.declare_file(name, cache=self._cache_output, unlink_when_done=False)
+
+        self._event = None  # free args memory. Once in a file they are not needed anymore.
+        self.add_input(self._input_file, "infile")
+        self.add_output(self._output_file, "outfile")
 
     ##
     # Specify function arguments. Accepts arrays and dictionaries. This
@@ -960,8 +1125,8 @@ class FunctionCall(Task):
     # @param args             An array of positional args to be passed to the function
     # @param kwargs           A dictionary of keyword arguments to be passed to the function
     def set_fn_args(self, args=[], kwargs={}):
-        self._event["fn_kwargs"] = kwargs
         self._event["fn_args"] = args
+        self._event["fn_kwargs"] = kwargs
 
     ##
     # Specify how the remote task should execute
@@ -975,20 +1140,65 @@ class FunctionCall(Task):
             remote_task_exec_method = "fork"
         self._event["remote_task_exec_method"] = remote_task_exec_method
 
+    ##
+    # Retrieve output, handles cleanup, and returns result or failure reason.
+    @property
+    def output(self):
+        if self._tmp_output_enabled:
+            raise ValueError("temp output was enabled for this task, thus its output is not available locallly.")
+
+        if not self._output_loaded:
+            if self.successful():
+                try:
+                    output = self._output_file.contents()
+                    if self._serialize_output:
+                        output = cloudpickle.loads(output)
+                except Exception as e:
+                    self._output = e
+
+                if output['Success']:
+                    self._output = output['Result']
+                else:
+                    self._output = output['Reason']
+
+            else:
+                self._output = FunctionCallNoResult()
+
+            self._output_loaded = True
+        return self._output
+
+    def __del__(self):
+        try:
+            if self._input_file:
+                self.manager.undeclare_file(self._input_file)
+                self._input_file = None
+            super().__del__()
+        except TypeError:
+            # in case the interpreter is shuting down. staging files will be deleted by manager atexit function.
+            pass
+
+
+class FunctionCallNoResult(Exception):
+    pass
+
 
 ##
 # \class LibraryTask
 #
 # TaskVine LibraryTask object
 #
-# This class represents a task specialized to running a coprocess that contains Python functions at the worker
+# This class represents a task that contains persistent Python functions at the worker
 class LibraryTask(Task):
     ##
     # Create a new LibraryTask task specification.
     #
-    # @param self       Reference to the current remote task object.
-    # @param fn         The command for this LibraryTask to run
-    # @param name       The name of this Library.
-    def __init__(self, fn, name):
+    # @param self               Reference to the current remote task object.
+    # @param fn                 The command for this LibraryTask to run
+    # @param library_name       The name of this Library.
+    def __init__(self, fn, library_name):
         Task.__init__(self, fn)
-        self.library_name = "library_coprocess:" + name
+        self._manager_will_free = True
+        self.provides_library(library_name)
+
+
+# vim: set sts=4 sw=4 ts=4 expandtab ft=python:

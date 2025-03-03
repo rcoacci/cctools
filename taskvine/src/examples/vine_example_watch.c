@@ -30,9 +30,6 @@ int main(int argc, char *argv[])
 	struct vine_manager *m;
 	struct vine_task *t;
 
-	//runtime logs will be written to vine_example_watch_info/%Y-%m-%dT%H:%M:%S
-	vine_set_runtime_info_path("vine_example_watch_info");
-
 	m = vine_create(VINE_DEFAULT_PORT);
 	if(!m) {
 		printf("Couldn't create manager: %s\n", strerror(errno));
@@ -40,13 +37,13 @@ int main(int argc, char *argv[])
 	}
 	printf("Listening on port %d...\n", vine_port(m));
 
-	struct vine_file *scriptfile = vine_declare_buffer(m,script,strlen(script), VINE_CACHE);
+	struct vine_file *scriptfile = vine_declare_buffer(m,script,strlen(script), VINE_CACHE_LEVEL_WORKFLOW, 0);
 
 	int i;
 	for(i=0;i<10;i++) {
 		char output_name[256];
 		sprintf(output_name,"output.%d",i);
-		struct vine_file *output_file = vine_declare_file(m, output_name, VINE_CACHE);
+		struct vine_file *output_file = vine_declare_file(m, output_name, VINE_CACHE_LEVEL_WORKFLOW, 0);
 
 		t = vine_task_create("./trickle.sh > output");
 		vine_task_add_input(t, scriptfile, "trickle.sh", 0);
